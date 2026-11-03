@@ -64,7 +64,7 @@ try {
     }
 
     Write-Host 'Packing...'
-    dotnet vpk pack --packId PersonalAssistantApp --packVersion $Version --packDir $publish --mainExe PersonalAssistant.exe `
+    dotnet vpk pack --packId PersonalAssistantApp --packVersion $Version --runtime win-x64 --packDir $publish --mainExe PersonalAssistant.exe `
         --packTitle 'Personal Assistant' --packAuthors 'redit0' --icon src\Assistant.App\assistant.ico -o $releases
     if ($LASTEXITCODE -ne 0) { throw 'vpk pack failed.' }
 
