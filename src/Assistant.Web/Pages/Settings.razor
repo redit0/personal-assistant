@@ -1,0 +1,610 @@
+@page "/settings"
+@using Assistant.Agent
+@using Assistant.Connectors.Microsoft
+@using Assistant.Core.Secrets
+@using Assistant.Core.Settings
+@using Assistant.Core.Tools
+@using Assistant.Mcp
+@using Assistant.Tools.Catalog
+@using Assistant.Tools.Repos
+@using Microsoft.Extensions.AI
+@using Microsoft.Extensions.DependencyInjection
+@inject UserSettingsStore SettingsStore
+@inject ISecretStore Secrets
+@inject ChatClientFactory Clients
+@inject MicrosoftAuthService MicrosoftAuth
+@inject McpTokenProvider McpTokens
+@inject McpHostStatus McpStatus
+@inject ToolCatalog Catalog
+@inject IToolPolicyStore Policies
+@inject IServiceScopeFactory Scopes
+@inject IClipboardService Clipboard
+@inject IUpdateService Updates
+@inject IStartupService Startup
+@implements IDisposable
+
+<header class="page-header">
+    <h1>Settings</h1>
+    @if (_saved is not null)
+    {
+        <span class="toast" role="status">@_saved</span>
+    }
+</header>
+
+@* ---------- AI provider ---------- *@
+<section class="card">
+    <h2>AI provider</h2>
+    <p class="muted">The chat window and, later, triage use this model. Keys are kept in Windows Credential Manager.</p>
+
+    <div class="form-grid">
+        <label for="provider">Provider</label>
+        <select id="provider" @bind="_settings.AI.Provider" @bind:after="LoadApiKeyState">
+            @foreach (var p in Enum.GetValues<AiProvider>())
+            {
+                <option value="@p">@ProviderLabel(p)</option>
+            }
+        </select>
+
+        @if (_settings.AI.Provider != AiProvider.None)
+        {
+            <label for="model">@(_settings.AI.Provider == AiProvider.AzureOpenAI ? "Deployment" : "Model")</label>
+            <input id="model" @bind="_settings.AI.Model" placeholder="@ModelPlaceholder()" />
+
+            @if (_settings.AI.Provider is AiProvider.AzureOpenAI or AiProvider.Ollama)
+            {
+                <label for="endpoint">Endpoint</label>
+                <input id="endpoint" @bind="_settings.AI.Endpoint"
+                       placeholder="@(_settings.AI.Provider == AiProvider.Ollama ? ChatClientFactory.DefaultOllamaEndpoint : "https://your-resource.openai.azure.com/")" />
+            }
+
+            @if (_settings.AI.Provider != AiProvider.Ollama)
+            {
+                <label for="apikey">API key</label>
+                <div class="inline">
+                    <input id="apikey" type="password" @bind="_apiKey" placeholder="@(_hasApiKey ? "Saved. Enter a new key to replace it." : "Paste your key")" autocomplete="off" />
+                    @if (_hasApiKey)
+                    {
+                        <button class="subtle" @onclick="ClearApiKey">Remove</button>
+                    }
+                </div>
+            }
+
+            <label for="maxtokens">Max output tokens</label>
+            <input id="maxtokens" type="number" min="256" step="256" @bind="_settings.AI.MaxOutputTokens" />
+        }
+    </div>
+
+    <div class="actions">
+        <button class="primary" @onclick="SaveAi">Save</button>
+        <button @onclick="TestAiAsync" disabled="@(_settings.AI.Provider == AiProvider.None || _testing)">@(_testing ? "Testing…" : "Test")</button>
+        @if (_aiTest is not null)
+        {
+            <span class="@(_aiTestOk ? "ok" : "error-text")">@_aiTest</span>
+        }
+    </div>
+</section>
+
+@* ---------- Microsoft 365 ---------- *@
+<section class="card">
+    <h2>Microsoft 365</h2>
+    <p class="muted">
+        Register a public client app in Entra ID with the redirect URI
+        <code>ms-appx-web://microsoft.aad.brokerplugin/&lt;client-id&gt;</code>, then paste its IDs here.
+        Sign-in uses the Windows account broker, so this app never handles your password.
+    </p>
+
+    <div class="form-grid">
+        <label for="clientid">Application (client) ID</label>
+        <input id="clientid" @bind="_settings.Microsoft.ClientId" placeholder="00000000-0000-0000-0000-000000000000" />
+        <label for="tenant">Directory (tenant) ID</label>
+        <input id="tenant" @bind="_settings.Microsoft.TenantId" placeholder="organizations" />
+    </div>
+
+    <div class="actions">
+        <button class="primary" @onclick="SaveMicrosoft">Save</button>
+        @if (_msAccount is null)
+        {
+            <button @onclick="SignInAsync" disabled="@(!MicrosoftAuth.IsConfigured || _signingIn)">@(_signingIn ? "Signing in…" : "Sign in")</button>
+        }
+        else
+        {
+            <span>Signed in as <strong>@_msAccount</strong></span>
+            <button class="subtle" @onclick="SignOutAsync">Sign out</button>
+        }
+        @if (_msError is not null)
+        {
+            <span class="error-text">@_msError</span>
+        }
+    </div>
+</section>
+
+@* ---------- MCP server ---------- *@
+<section class="card">
+    <h2>MCP server</h2>
+    @if (McpStatus.IsRunning)
+    {
+        <p><span class="status-dot on"></span> Listening on <code>@McpStatus.Endpoint</code> (this computer only).</p>
+    }
+    else
+    {
+        <p><span class="status-dot off"></span> Not running. @McpStatus.Error</p>
+    }
+
+    <div class="form-grid">
+        <label>Bearer token</label>
+        <div class="inline">
+            <input readonly value="@(_showToken ? McpTokens.GetToken() : new string('•', 24))" aria-label="Bearer token" />
+            <button class="subtle" @onclick="() => _showToken = !_showToken">@(_showToken ? "Hide" : "Show")</button>
+            <button class="subtle" @onclick="CopyToken">Copy</button>
+            <button class="subtle" @onclick="RegenerateToken">Regenerate</button>
+        </div>
+
+        <label for="port">Port</label>
+        <div class="inline">
+            <input id="port" type="number" min="1024" max="65535" @bind="_settings.Mcp.Port" />
+            <label class="check"><input type="checkbox" @bind="_settings.Mcp.Enabled" /> Enabled</label>
+            <button @onclick="SaveMcp">Save</button>
+            <span class="muted">Restart the app after changing these.</span>
+        </div>
+    </div>
+
+    <h3>Connect Claude Code</h3>
+    <div class="snippet">
+        <pre>@McpClientConfig.ClaudeCode(McpStatus.Port, Masked())</pre>
+        <button @onclick="CopyClaudeCode">Copy command</button>
+    </div>
+
+    <h3>Connect VS Code (<code>.vscode/mcp.json</code> or user settings)</h3>
+    <div class="snippet">
+        <pre>@McpClientConfig.VsCode(McpStatus.Port, Masked())</pre>
+        <button @onclick="CopyVsCode">Copy config</button>
+    </div>
+</section>
+
+@* ---------- Tool permissions ---------- *@
+<section class="card">
+    <h2>Tool permissions</h2>
+    <p class="muted">
+        Applies to the chat and every MCP client. <strong>Ask</strong> shows an approval window from the tray app.
+        Actions on items from senders outside your organization always ask, whatever is set here.
+    </p>
+    <table class="grid">
+        <thead><tr><th>Tool</th><th>Kind</th><th>Default</th><th>Setting</th></tr></thead>
+        <tbody>
+            @foreach (var tool in Catalog.Tools)
+            {
+                var current = _overrides.TryGetValue(tool.Name, out var o) ? o.ToString() : "";
+                <tr>
+                    <td><code>@tool.Name</code><div class="muted small">@tool.Title</div></td>
+                    <td>@CategoryLabel(tool.Category)</td>
+                    <td>@tool.DefaultPolicy</td>
+                    <td>
+                        <select value="@current" @onchange="e => SetPolicyAsync(tool.Name, e.Value?.ToString())" aria-label="Policy for @tool.Name">
+                            <option value="">Default</option>
+                            @foreach (var p in Enum.GetValues<ToolPolicy>())
+                            {
+                                <option value="@p">@p</option>
+                            }
+                        </select>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</section>
+
+@* ---------- Repos ---------- *@
+<section class="card">
+    <h2>Repos</h2>
+    <p class="muted">Folders to scan for git clones. Agents use this map to find where to work on an item.</p>
+
+    <ul class="plain roots">
+        @foreach (var root in _settings.Repos.ScanRoots)
+        {
+            <li><code>@root</code> <button class="subtle" @onclick="() => RemoveRoot(root)">Remove</button></li>
+        }
+    </ul>
+    <form class="inline" @onsubmit="AddRoot">
+        <input class="grow" placeholder="D:\src" @bind="_newRoot" aria-label="Folder to scan" />
+        <button type="submit" disabled="@string.IsNullOrWhiteSpace(_newRoot)">Add folder</button>
+        <button type="button" class="primary" @onclick="ScanAsync" disabled="@(_settings.Repos.ScanRoots.Count == 0 || _scanning)">@(_scanning ? "Scanning…" : "Scan now")</button>
+    </form>
+    @if (_scanResult is not null)
+    {
+        <p class="muted">@_scanResult</p>
+    }
+
+    @if (_repos.Count > 0)
+    {
+        <table class="grid">
+            <thead><tr><th>Name</th><th>Host</th><th>Local path</th></tr></thead>
+            <tbody>
+                @foreach (var r in _repos)
+                {
+                    <tr><td>@r.Name</td><td>@r.Host</td><td><code>@r.LocalPath</code></td></tr>
+                }
+            </tbody>
+        </table>
+    }
+</section>
+
+@* ---------- Daily digest ---------- *@
+<section class="card">
+    <h2>Daily digest</h2>
+    <p class="muted">A morning summary on the Today page: meetings, what's due and overdue, what's new, and what you've been waiting on.</p>
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Digest.Enabled" /> Show the digest each morning</label>
+        <label for="digesttime">Time</label>
+        <input id="digesttime" type="time" @bind="DigestTime" />
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Digest.WeekdaysOnly" /> Weekdays only</label>
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Digest.AiSummary" /> Add an AI-written overview and top priorities (uses the triage model)</label>
+        <label for="stale">Call out waiting-on items older than (days)</label>
+        <input id="stale" type="number" min="1" @bind="_settings.Digest.StaleWaitingDays" />
+    </div>
+    <div class="actions">
+        <button class="primary" @onclick="SaveDigest">Save</button>
+    </div>
+</section>
+
+@* ---------- Reminders ---------- *@
+<section class="card">
+    <h2>Reminders</h2>
+    <div class="form-grid">
+        <label for="lead">Remind me this many minutes before an item is due</label>
+        <div class="inline">
+            <input id="lead" type="number" min="0" step="15" @bind="_settings.Reminders.LeadTimeMinutes" />
+            <button @onclick="SaveReminders">Save</button>
+        </div>
+    </div>
+</section>
+
+@* ---------- Startup ---------- *@
+<section class="card">
+    <h2>Startup</h2>
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" checked="@Startup.IsEnabled" @onchange="SetStartup" /> Start Personal Assistant when I sign in to Windows</label>
+    </div>
+    <p class="muted">It starts in the tray. Installing turns this on. Windows also lists it under Settings → Apps → Startup.</p>
+    @if (_startupError is not null)
+    {
+        <p class="error-text">@_startupError</p>
+    }
+</section>
+
+@* ---------- Updates ---------- *@
+<section class="card">
+    <h2>Updates</h2>
+    <p class="muted">
+        Version @Updates.CurrentVersion. Installed copies update from GitHub releases published with build/release.ps1.
+        Updates download in the background, and nothing changes until you choose to restart.
+    </p>
+    <div class="form-grid">
+        <label for="uprepo">Releases repo</label>
+        <input id="uprepo" placeholder="https://github.com/you/personal-assistant" @bind="_settings.Updates.GitHubRepo" />
+        <label for="uptoken">Token for a private repo</label>
+        <input id="uptoken" type="password" autocomplete="off" @bind="_updateToken"
+               placeholder="@(Secrets.Get(SecretNames.UpdateToken) is null ? "Optional. Uses your GitHub connector token if empty." : "Saved. Enter a new token to replace it.")" />
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Updates.AutoCheck" /> Check once a day</label>
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Updates.IncludePrerelease" /> Include prereleases</label>
+    </div>
+    <div class="actions">
+        <button class="primary" @onclick="SaveUpdatesAsync">Save</button>
+        <button @onclick="CheckUpdatesAsync" disabled="@(Updates.State is UpdateState.Checking or UpdateState.Downloading)">Check now</button>
+        @if (Updates.State == UpdateState.Ready)
+        {
+            <button class="primary" @onclick="Updates.ApplyAndRestart">Restart and install @Updates.PendingVersion</button>
+        }
+        <span class="@(Updates.State == UpdateState.Failed ? "error-text" : "muted")">@UpdateStatus()</span>
+    </div>
+</section>
+
+@code {
+    private UserSettings _settings = new();
+    private string? _apiKey;
+    private bool _hasApiKey;
+    private string? _aiTest;
+    private bool _aiTestOk;
+    private bool _testing;
+    private string? _msAccount;
+    private string? _msError;
+    private bool _signingIn;
+    private bool _showToken;
+    private IReadOnlyDictionary<string, ToolPolicy> _overrides = new Dictionary<string, ToolPolicy>();
+    private string? _newRoot;
+    private bool _scanning;
+    private string? _scanResult;
+    private List<RepoDto> _repos = [];
+    private string? _saved;
+    private string? _updateToken;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _settings = SettingsStore.Current;
+        Updates.Changed += OnUpdatesChanged;
+        LoadApiKeyState();
+        _overrides = await Policies.GetOverridesAsync();
+        await LoadReposAsync();
+
+        try
+        {
+            _msAccount = (await MicrosoftAuth.GetAccountAsync())?.Username;
+        }
+        catch (Exception ex)
+        {
+            _msError = ex.Message;
+        }
+    }
+
+    private void LoadApiKeyState()
+    {
+        _apiKey = null;
+        _hasApiKey = _settings.AI.Provider != AiProvider.None &&
+            !string.IsNullOrEmpty(Secrets.Get(SecretNames.AiApiKey(_settings.AI.Provider.ToString())));
+    }
+
+    private void SaveAi()
+    {
+        if (!string.IsNullOrWhiteSpace(_apiKey))
+        {
+            Secrets.Set(SecretNames.AiApiKey(_settings.AI.Provider.ToString()), _apiKey.Trim());
+        }
+
+        SettingsStore.Update(s => s.AI = _settings.AI);
+        LoadApiKeyState();
+        Flash("AI settings saved");
+    }
+
+    private void ClearApiKey()
+    {
+        Secrets.Delete(SecretNames.AiApiKey(_settings.AI.Provider.ToString()));
+        SettingsStore.Update(s => s.AI = _settings.AI);
+        LoadApiKeyState();
+        Flash("API key removed");
+    }
+
+    private async Task TestAiAsync()
+    {
+        SaveAi();
+        _testing = true;
+        _aiTest = null;
+
+        try
+        {
+            var client = Clients.GetClient() ?? throw new InvalidOperationException(Clients.UnavailableReason());
+            var response = await client.GetResponseAsync("Reply with the single word OK.");
+            _aiTestOk = true;
+            _aiTest = $"Connected. The model replied: {response.Text.Trim()}";
+        }
+        catch (Exception ex)
+        {
+            _aiTestOk = false;
+            _aiTest = ex.Message;
+        }
+        finally
+        {
+            _testing = false;
+        }
+    }
+
+    private void SaveMicrosoft()
+    {
+        SettingsStore.Update(s => s.Microsoft = _settings.Microsoft);
+        Flash("Microsoft settings saved");
+    }
+
+    private async Task SignInAsync()
+    {
+        _signingIn = true;
+        _msError = null;
+        try
+        {
+            SaveMicrosoft();
+            var result = await MicrosoftAuth.SignInAsync();
+            _msAccount = result.Account?.Username;
+        }
+        catch (Exception ex)
+        {
+            _msError = ex.Message;
+        }
+        finally
+        {
+            _signingIn = false;
+        }
+    }
+
+    private async Task SignOutAsync()
+    {
+        await MicrosoftAuth.SignOutAsync();
+        _msAccount = null;
+    }
+
+    private void SaveMcp()
+    {
+        SettingsStore.Update(s => s.Mcp = _settings.Mcp);
+        Flash("Saved. Restart the app to apply.");
+    }
+
+    private void RegenerateToken()
+    {
+        McpTokens.Regenerate();
+        Flash("New token issued. Reconnect your MCP clients.");
+    }
+
+    private string Masked() => _showToken ? McpTokens.GetToken() : "<token>";
+
+    private void CopyToken() => Copy(McpTokens.GetToken(), "Token copied");
+
+    private void CopyClaudeCode() => Copy(McpClientConfig.ClaudeCode(McpStatus.Port, McpTokens.GetToken()), "Command copied");
+
+    private void CopyVsCode() => Copy(McpClientConfig.VsCode(McpStatus.Port, McpTokens.GetToken()), "Config copied");
+
+    private void Copy(string text, string message)
+    {
+        Clipboard.SetText(text);
+        Flash(message);
+    }
+
+    private async Task SetPolicyAsync(string tool, string? value)
+    {
+        await Policies.SetOverrideAsync(tool, Enum.TryParse<ToolPolicy>(value, out var p) ? p : null);
+        _overrides = await Policies.GetOverridesAsync();
+        Flash($"{tool} updated");
+    }
+
+    private void AddRoot()
+    {
+        var root = _newRoot?.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return;
+        }
+
+        if (!Directory.Exists(root))
+        {
+            _scanResult = $"{root} does not exist.";
+            return;
+        }
+
+        if (!_settings.Repos.ScanRoots.Contains(root, StringComparer.OrdinalIgnoreCase))
+        {
+            _settings.Repos.ScanRoots.Add(root);
+            SettingsStore.Update(s => s.Repos = _settings.Repos);
+        }
+
+        _newRoot = null;
+    }
+
+    private void RemoveRoot(string root)
+    {
+        _settings.Repos.ScanRoots.Remove(root);
+        SettingsStore.Update(s => s.Repos = _settings.Repos);
+    }
+
+    private async Task ScanAsync()
+    {
+        _scanning = true;
+        try
+        {
+            await using var scope = Scopes.CreateAsyncScope();
+            var scanner = scope.ServiceProvider.GetRequiredService<RepoScanner>();
+            var result = await Task.Run(() => scanner.ScanAsync(_settings.Repos.ScanRoots));
+            _scanResult = $"Found {result.Found} clones ({result.Added} new, {result.Removed} removed).";
+            await LoadReposAsync();
+        }
+        catch (Exception ex)
+        {
+            _scanResult = ex.Message;
+        }
+        finally
+        {
+            _scanning = false;
+        }
+    }
+
+    private async Task LoadReposAsync()
+    {
+        await using var scope = Scopes.CreateAsyncScope();
+        _repos = [.. await ActivatorUtilities.CreateInstance<RepoTools>(scope.ServiceProvider).ListReposAsync()];
+    }
+
+    private TimeOnly? DigestTime
+    {
+        get => TimeOnly.TryParse(_settings.Digest.Time, System.Globalization.CultureInfo.InvariantCulture, out var t) ? t : null;
+        set => _settings.Digest.Time = (value ?? new TimeOnly(8, 0)).ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private void SaveDigest()
+    {
+        SettingsStore.Update(s => s.Digest = _settings.Digest);
+        Flash("Digest settings saved");
+    }
+
+    private void SaveReminders()
+    {
+        SettingsStore.Update(s => s.Reminders = _settings.Reminders);
+        Flash("Reminder settings saved");
+    }
+
+    private async Task SaveUpdatesAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(_updateToken))
+        {
+            Secrets.Set(SecretNames.UpdateToken, _updateToken.Trim());
+            _updateToken = null;
+        }
+
+        SettingsStore.Update(s => s.Updates = _settings.Updates);
+        Flash("Update settings saved");
+        await CheckUpdatesAsync();
+    }
+
+    private Task CheckUpdatesAsync() => Updates.CheckAsync();
+
+    private string? _startupError;
+
+    private void SetStartup(ChangeEventArgs e)
+    {
+        try
+        {
+            Startup.SetEnabled(e.Value is true);
+            _startupError = null;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+            _startupError = $"Windows didn't allow the change: {ex.Message}";
+        }
+    }
+
+    private string UpdateStatus() => Updates.State switch
+    {
+        UpdateState.NotInstalled => "Running from a build folder, so updates are off. Install with Setup.exe to get them.",
+        UpdateState.NotConfigured => "Add the releases repo to turn updates on.",
+        UpdateState.Checking => "Checking…",
+        UpdateState.Downloading => "Downloading the update…",
+        UpdateState.UpToDate => $"Up to date. Checked {Updates.LastCheckedAt?.ToLocalTime():g}.",
+        UpdateState.Ready => $"{Updates.PendingVersion} is downloaded and ready.",
+        UpdateState.Failed => $"Couldn't check for updates: {Updates.Error}",
+        _ => "",
+    };
+
+    private void OnUpdatesChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Updates.Changed -= OnUpdatesChanged;
+
+    private async void Flash(string message)
+    {
+        _saved = message;
+        StateHasChanged();
+        await Task.Delay(2500);
+        if (_saved == message)
+        {
+            _saved = null;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private string ModelPlaceholder() => _settings.AI.Provider switch
+    {
+        AiProvider.Anthropic => ChatClientFactory.DefaultAnthropicModel,
+        AiProvider.OpenAI => ChatClientFactory.DefaultOpenAIModel,
+        AiProvider.Ollama => ChatClientFactory.DefaultOllamaModel,
+        _ => "your-deployment-name",
+    };
+
+    private static string ProviderLabel(AiProvider p) => p switch
+    {
+        AiProvider.None => "None",
+        AiProvider.Anthropic => "Anthropic (Claude)",
+        AiProvider.OpenAI => "OpenAI",
+        AiProvider.AzureOpenAI => "Azure OpenAI",
+        AiProvider.Ollama => "Ollama (local)",
+        _ => p.ToString(),
+    };
+
+    private static string CategoryLabel(ToolCategory c) => c switch
+    {
+        ToolCategory.Read => "Read",
+        ToolCategory.ItemManagement => "Changes items",
+        _ => "External action",
+    };
+}

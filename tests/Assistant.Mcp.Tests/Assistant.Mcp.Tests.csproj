@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.14" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="ModelContextProtocol" Version="2.3.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Assistant.Mcp\Assistant.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\Assistant.Mcp.Stdio\Assistant.Mcp.Stdio.csproj" />
+    <ProjectReference Include="..\..\src\Assistant.Connectors.GitHub\Assistant.Connectors.GitHub.csproj" />
+    <ProjectReference Include="..\..\src\Assistant.Connectors.Atlassian\Assistant.Connectors.Atlassian.csproj" />
+    <ProjectReference Include="..\..\src\Assistant.Connectors.Microsoft\Assistant.Connectors.Microsoft.csproj" />
+    <ProjectReference Include="..\..\src\Assistant.Agent\Assistant.Agent.csproj" />
+    <ProjectReference Include="..\..\src\Assistant.Web\Assistant.Web.csproj" />
+    <ProjectReference Include="..\..\src\Assistant.Actions\Assistant.Actions.csproj" />
+    <ProjectReference Include="..\..\tools\Assistant.Eval\Assistant.Eval.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

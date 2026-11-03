@@ -1,0 +1,51 @@
+@inject TimeProvider Time
+
+<section class="card">
+    <h2>@Title <span class="count-badge @(Warn && Items.Count > 0 ? "warn" : null)">@Items.Count</span></h2>
+    @if (Items.Count == 0)
+    {
+        <p class="muted">@Empty</p>
+    }
+    else
+    {
+        <ul class="plain digest-items">
+            @foreach (var item in Items)
+            {
+                <li>
+                    <span class="priority @Formatting.PriorityClass(item.Priority)"></span>
+                    <span class="item-id">#@item.Id</span>
+                    @if (item.SourceUrl is not null)
+                    {
+                        <a href="@item.SourceUrl" target="_blank" rel="noopener">@item.Title</a>
+                    }
+                    else
+                    {
+                        @item.Title
+                    }
+                    @if (item.DueAt is not null)
+                    {
+                        <span class="muted small">@Formatting.Relative(item.DueAt.Value, Time.GetUtcNow().UtcDateTime)</span>
+                    }
+                    @if (!string.IsNullOrEmpty(item.Requester))
+                    {
+                        <span class="muted small">from @item.Requester</span>
+                    }
+                </li>
+            }
+        </ul>
+    }
+</section>
+
+@code {
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = "";
+
+    [Parameter, EditorRequired]
+    public IReadOnlyList<ItemSummary> Items { get; set; } = [];
+
+    [Parameter]
+    public string Empty { get; set; } = "Nothing here.";
+
+    [Parameter]
+    public bool Warn { get; set; }
+}

@@ -1,0 +1,65 @@
+@page "/activity"
+@using Assistant.Core.Audit
+@using Assistant.Data
+@using Microsoft.EntityFrameworkCore
+@using Microsoft.Extensions.DependencyInjection
+@implements IDisposable
+@inject IServiceScopeFactory Scopes
+@inject Assistant.Tools.Catalog.ToolInvoker Invoker
+
+<header class="page-header">
+    <h1>Activity</h1>
+    <span class="muted">Every tool call made by the chat or an MCP client, newest first</span>
+</header>
+
+@if (_entries.Count == 0)
+{
+    <div class="empty"><p>No tool calls yet.</p></div>
+}
+else
+{
+    <table class="grid">
+        <thead>
+            <tr><th>When</th><th>Caller</th><th>Tool</th><th>Decision</th><th>Result</th><th>Arguments</th></tr>
+        </thead>
+        <tbody>
+            @foreach (var e in _entries)
+            {
+                <tr>
+                    <td class="nowrap">@e.Timestamp.ToLocalTime().ToString("g")</td>
+                    <td>@e.Caller</td>
+                    <td><code>@e.Tool</code></td>
+                    <td><span class="chip decision-@e.Decision.ToString().ToLowerInvariant()">@e.Decision</span></td>
+                    <td>@(e.Succeeded ? "OK" : e.Error)</td>
+                    <td><code class="args">@e.ArgumentsJson</code></td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private List<AuditEntry> _entries = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        Invoker.Audited += OnAudited;
+        await LoadAsync();
+    }
+
+    private void OnAudited(AuditEntry entry) =>
+        InvokeAsync(async () =>
+        {
+            await LoadAsync();
+            StateHasChanged();
+        });
+
+    private async Task LoadAsync()
+    {
+        await using var scope = Scopes.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AssistantDbContext>();
+        _entries = await db.AuditEntries.AsNoTracking().OrderByDescending(e => e.Timestamp).Take(300).ToListAsync();
+    }
+
+    public void Dispose() => Invoker.Audited -= OnAudited;
+}

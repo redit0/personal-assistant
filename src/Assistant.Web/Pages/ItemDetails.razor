@@ -1,0 +1,119 @@
+<div class="item-details">
+    @if (!string.IsNullOrWhiteSpace(Item.Details))
+    {
+        <p class="details-text"><LinkedText Text="@Item.Details" /></p>
+    }
+
+    <dl class="facts">
+        <dt>Status</dt><dd>@Item.Status</dd>
+        <dt>Priority</dt><dd>@Item.Priority</dd>
+        @if (Item.DueAt is not null)
+        {
+            <dt>Due</dt><dd>@Item.DueAt.Value.ToLocalTime().ToString("f")@(Item.DueConfidence is { } c ? $" ({c:P0} sure)" : "")</dd>
+        }
+        @if (!string.IsNullOrEmpty(Item.Requester))
+        {
+            <dt>Requester</dt><dd>@Item.Requester (@Item.Trust)</dd>
+        }
+        @if (!string.IsNullOrEmpty(Item.RepoHint))
+        {
+            <dt>Repo</dt><dd>@Item.RepoHint</dd>
+        }
+        @if (!string.IsNullOrEmpty(Item.SourceUrl))
+        {
+            <dt>Source</dt><dd><a href="@Item.SourceUrl" target="_blank" rel="noopener">@Item.SourceUrl</a></dd>
+        }
+        @if (!string.IsNullOrEmpty(Item.Reasoning))
+        {
+            <dt>Why</dt><dd>@Item.Reasoning</dd>
+        }
+        <dt>Created</dt><dd>@Item.CreatedAt.ToLocalTime().ToString("g") via @Item.Source</dd>
+    </dl>
+
+    @if (Item.MergedFrom is { Count: > 0 } merged)
+    {
+        <h3>Also came in from</h3>
+        <ul class="plain merged">
+            @foreach (var d in merged)
+            {
+                <li>
+                    @if (!string.IsNullOrEmpty(d.SourceUrl))
+                    {
+                        <a href="@d.SourceUrl" target="_blank" rel="noopener">@d.Title</a>
+                    }
+                    else
+                    {
+                        @d.Title
+                    }
+                    <span class="muted">@d.Source@(d.Requester is null ? "" : $", from {d.Requester}"), @d.CreatedAt.ToLocalTime().ToString("g")</span>
+                    @if (OnSplit.HasDelegate)
+                    {
+                        <button class="link" title="These are different requests; make this its own item again" @onclick="() => OnSplit.InvokeAsync(d.Id)">Split out</button>
+                    }
+                    @if (!string.IsNullOrWhiteSpace(d.Details))
+                    {
+                        <div class="muted"><LinkedText Text="@d.Details" /></div>
+                    }
+                </li>
+            }
+        </ul>
+    }
+
+    @if (Item.Artifacts.Count > 0)
+    {
+        <h3>Linked</h3>
+        <ul class="plain">
+            @foreach (var a in Item.Artifacts)
+            {
+                <li><a href="@a.Url" target="_blank" rel="noopener">@(a.Description ?? a.Url)</a> <span class="muted">@a.Kind, added by @a.AddedBy</span></li>
+            }
+        </ul>
+    }
+
+    @if (Item.Notes.Count > 0)
+    {
+        <h3>Notes</h3>
+        <ul class="plain notes">
+            @foreach (var n in Item.Notes)
+            {
+                <li><span class="muted">@n.CreatedAt.ToLocalTime().ToString("g"), @n.Author:</span> @n.Text</li>
+            }
+        </ul>
+    }
+
+    <form class="note-form" @onsubmit="SubmitNoteAsync">
+        <input class="grow" placeholder="Add a note" @bind="_note" aria-label="Note" />
+        <button type="submit" disabled="@string.IsNullOrWhiteSpace(_note)">Add note</button>
+    </form>
+
+    @if (!string.IsNullOrEmpty(Item.SourceContent))
+    {
+        <details>
+            <summary>Original source text</summary>
+            <pre class="source"><LinkedText Text="@LinkText.WithoutAgentLabel(Item.SourceContent)" /></pre>
+        </details>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public ItemDetail Item { get; set; } = null!;
+
+    [Parameter]
+    public EventCallback<string> OnAddNote { get; set; }
+
+    /// <summary>Called with a merged duplicate's ID when you split it back out.</summary>
+    [Parameter]
+    public EventCallback<int> OnSplit { get; set; }
+
+    private string? _note;
+
+    private async Task SubmitNoteAsync()
+    {
+        if (!string.IsNullOrWhiteSpace(_note))
+        {
+            await OnAddNote.InvokeAsync(_note);
+            _note = null;
+        }
+    }
+}

@@ -1,0 +1,115 @@
+@page "/today"
+@using Assistant.Agent.Digest
+@using Assistant.Agent.Calendar
+@inject DigestBuilder Digests
+@inject TimeProvider Time
+@inject NavigationManager Nav
+
+<header class="page-header">
+    <h1>Today</h1>
+    <div class="inline">
+        @if (_digest is not null)
+        {
+            <span class="muted small">Updated @_digest.GeneratedAt.ToString("h:mm tt")</span>
+        }
+        <button @onclick="() => LoadAsync(refresh: true)" disabled="@_loading">@(_loading ? "Working…" : "Refresh")</button>
+    </div>
+</header>
+
+@if (_error is not null)
+{
+    <div class="banner error" role="alert">@_error</div>
+}
+
+@if (_digest is null)
+{
+    <div class="empty"><p>@(_loading ? "Putting your day together…" : "No digest yet.")</p></div>
+}
+else
+{
+    <p class="digest-headline">@_digest.Date.ToDateTime(TimeOnly.MinValue).ToString("dddd, MMMM d"): @_digest.Headline</p>
+
+    @if (!string.IsNullOrWhiteSpace(_digest.Summary))
+    {
+        <section class="card digest-summary">@MarkdownText.ToHtml(_digest.Summary)</section>
+    }
+
+    <section class="card">
+        <h2>Meetings</h2>
+        @if (_digest.CalendarError is not null)
+        {
+            <p class="error-text">Couldn't read your calendar: @_digest.CalendarError</p>
+        }
+        else if (_digest.Meetings.Count == 0)
+        {
+            <p class="muted">No meetings today.</p>
+        }
+        else
+        {
+            <ul class="plain meetings">
+                @foreach (var m in _digest.Meetings)
+                {
+                    <li class="@(m.End < Time.GetLocalNow() ? "past" : null)">
+                        <span class="when">@(m.AllDay ? "All day" : $"{m.Start:h:mm} to {m.End:h:mm tt}")</span>
+                        @if (m.Link is not null)
+                        {
+                            <a href="@m.Link" target="_blank" rel="noopener">@m.Subject</a>
+                        }
+                        else
+                        {
+                            @m.Subject
+                        }
+                        @if (m.YouOrganize)
+                        {
+                            <span class="chip">You organize</span>
+                        }
+                        @if (!string.IsNullOrEmpty(m.Location))
+                        {
+                            <span class="muted small">@m.Location</span>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+    </section>
+
+    <DigestSection Title="Prepare for" Items="_digest.Prep" Empty="Nothing to prep." />
+    <DigestSection Title="Due today" Items="_digest.DueToday" Empty="Nothing due today." />
+    <DigestSection Title="Overdue" Items="_digest.Overdue" Empty="Nothing overdue." Warn="true" />
+    <DigestSection Title="New since the last digest" Items="_digest.New" Empty="Nothing new." />
+    <DigestSection Title="Waiting on others for a while" Items="_digest.StaleWaiting" Empty="Nothing stuck." />
+
+    @if (_digest.NeedsReview > 0)
+    {
+        <p><a href="" @onclick:preventDefault @onclick="@(() => Nav.NavigateTo(""))">@_digest.NeedsReview item@(_digest.NeedsReview == 1 ? "" : "s") in Needs a look</a> on the Items page.</p>
+    }
+}
+
+@code {
+    private DailyDigest? _digest;
+    private bool _loading;
+    private string? _error;
+
+    protected override Task OnInitializedAsync() => LoadAsync(refresh: false);
+
+    private async Task LoadAsync(bool refresh)
+    {
+        _loading = true;
+        _error = null;
+        StateHasChanged();
+        try
+        {
+            // The digest can take a while the first time (calendar plus an AI summary), so keep the UI responsive.
+            var today = DateOnly.FromDateTime(Time.GetLocalNow().DateTime);
+            _digest = await Task.Run(() => Digests.GetAsync(today, refresh, CancellationToken.None));
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+}

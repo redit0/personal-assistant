@@ -1,0 +1,387 @@
+@page "/"
+@implements IDisposable
+@inject ItemsUiService ItemsService
+@inject Assistant.Tools.Catalog.ToolInvoker Invoker
+@inject Assistant.Tools.Sync.ConnectorSyncService Sync
+@inject TimeProvider Time
+@inject ClaudeLauncher Claude
+@inject Assistant.Core.Settings.UserSettingsStore SettingsStore
+
+<header class="page-header">
+    <h1>Items</h1>
+    <div class="segmented" role="tablist" aria-label="Filter">
+        @foreach (var (status, label) in Filters)
+        {
+            <button role="tab" aria-selected="@(_status == status)" class="@(_status == status ? "active" : null)"
+                    @onclick="() => SetStatusAsync(status)">@label</button>
+        }
+    </div>
+</header>
+
+@if (_groups.Count > 0)
+{
+    <div class="source-filters" role="group" aria-label="Show items from">
+        @foreach (var (group, count) in _groups)
+        {
+            var shown = !_hidden.Contains(group.Key);
+            <button class="source-chip @(shown ? "on" : "off")" aria-pressed="@shown"
+                    title="@(shown ? $"Hide {group.Label} items" : $"Show {group.Label} items")"
+                    @onclick="() => ToggleSource(group.Key)">
+                @group.Label <span class="count">@count</span>
+            </button>
+        }
+        @if (_hidden.Count > 0)
+        {
+            <button class="link" @onclick="ShowAllSources">Show all</button>
+        }
+    </div>
+}
+
+<form class="quick-add" @onsubmit="AddAsync">
+    <input class="grow" placeholder="Add an item, like “Send Dana the Q4 numbers”" @bind="_newTitle" aria-label="New item title" />
+    <select @bind="_newType" aria-label="Type">
+        @foreach (var type in Enum.GetValues<ItemType>())
+        {
+            <option value="@type">@Formatting.TypeLabel(type)</option>
+        }
+    </select>
+    <select @bind="_newPriority" aria-label="Priority">
+        @foreach (var p in Enum.GetValues<Priority>())
+        {
+            <option value="@p">@p</option>
+        }
+    </select>
+    <input type="datetime-local" @bind="_newDue" aria-label="Due" />
+    <button type="submit" class="primary" disabled="@string.IsNullOrWhiteSpace(_newTitle)">Add</button>
+</form>
+
+<div class="search-row">
+    <input type="search" placeholder="Search" @bind="_query" @bind:event="oninput" @bind:after="LoadAsync" aria-label="Search items" />
+    <label class="sort">
+        Sort by
+        <select value="@_sort" @onchange="SetSortAsync" aria-label="Sort items">
+            @foreach (var (sort, label) in Sorts)
+            {
+                <option value="@sort">@label</option>
+            }
+        </select>
+    </label>
+    <span class="muted">@_items.Count item@(_items.Count == 1 ? "" : "s")</span>
+</div>
+
+@if (_error is not null)
+{
+    <div class="banner error" role="alert">@_error</div>
+}
+
+@if (_items.Count == 0)
+{
+    <div class="empty">
+        @if (string.IsNullOrWhiteSpace(_query))
+        {
+            <p>Nothing here. Add an item above, or ask an agent connected through MCP to create one.</p>
+        }
+        else
+        {
+            <p>No items match "@_query".</p>
+        }
+    </div>
+}
+else
+{
+    <ul class="item-list">
+        @foreach (var item in _items)
+        {
+            var overdue = item.DueAt is not null && item.DueAt < Now && item.Status == ItemStatus.Open;
+            <li class="item @(item.Status is ItemStatus.Done or ItemStatus.Dismissed ? "closed" : null)">
+                <div class="item-row" @onclick="() => ToggleAsync(item.Id)">
+                    <span class="priority @Formatting.PriorityClass(item.Priority)" title="@item.Priority priority"></span>
+                    <div class="item-main">
+                        <div class="item-title"><span class="item-id">#@item.Id</span> @item.Title</div>
+                        <div class="item-meta">
+                            <span class="chip">@Formatting.TypeLabel(item.Type)</span>
+                            @if (item.DueAt is not null)
+                            {
+                                <span class="@(overdue ? "due overdue" : "due")">@(overdue ? "Overdue, " : "Due ")@Formatting.Relative(item.DueAt.Value, Now)</span>
+                            }
+                            @if (item.Status == ItemStatus.Snoozed && item.SnoozedUntil is not null)
+                            {
+                                <span class="muted">Snoozed until @Formatting.Relative(item.SnoozedUntil.Value, Now)</span>
+                            }
+                            @if (!string.IsNullOrEmpty(item.Requester))
+                            {
+                                <span class="muted">from @item.Requester</span>
+                            }
+                            @if (item.NeedsReview)
+                            {
+                                <span class="chip review">Needs a look</span>
+                            }
+                            <span class="muted">via @item.Source</span>
+                        </div>
+                    </div>
+                    <div class="item-actions" @onclick:stopPropagation="true">
+                        @if (item.Status is ItemStatus.Open or ItemStatus.Snoozed)
+                        {
+                            @if (ItemsUiService.IsTriaged(item.Source))
+                            {
+                                <button title="Worth tracking; keep it" @onclick="() => FeedbackAsync(item.Id, true)">&#x1F44D;</button>
+                                <button title="Not useful; dismiss it and learn from that" @onclick="() => FeedbackAsync(item.Id, false)">&#x1F44E;</button>
+                            }
+                            <button title="Open Claude Code in the item's repo, already asked to handle it. You approve its steps there, and its calls about this item skip the assistant's approval prompt." @onclick="() => HandToClaudeAsync(item.Id)">Hand to Claude</button>
+                            <button title="Mark done" @onclick="() => ActAsync(() => ItemsService.MarkDoneAsync(item.Id))">Done</button>
+                            @if (item.Status == ItemStatus.Snoozed)
+                            {
+                                <button title="Bring it back now" @onclick="() => ActAsync(() => ItemsService.ReopenAsync(item.Id))">Unsnooze</button>
+                            }
+                            <button title="Snooze one hour" @onclick="() => ActAsync(() => ItemsService.SnoozeAsync(item.Id, Time.GetLocalNow().AddHours(1)))">1h</button>
+                            <button title="Snooze until tomorrow at 9 AM" @onclick="() => ActAsync(() => ItemsService.SnoozeAsync(item.Id, TomorrowMorning()))">Tomorrow</button>
+                            <button class="subtle" title="Dismiss" @onclick="() => ActAsync(() => ItemsService.DismissAsync(item.Id))">Dismiss</button>
+                        }
+                        else
+                        {
+                            <button @onclick="() => ActAsync(() => ItemsService.ReopenAsync(item.Id))">Reopen</button>
+                        }
+                    </div>
+                </div>
+
+                @if (_expanded?.Id == item.Id)
+                {
+                    <ItemDetails Item="_expanded" OnAddNote="AddNoteAsync" OnSplit="SplitAsync" />
+                }
+            </li>
+        }
+    </ul>
+}
+
+@code {
+    private static readonly (ItemListStatus, string)[] Filters =
+    [
+        (ItemListStatus.Active, "Active"),
+        (ItemListStatus.NeedsReview, "Needs a look"),
+        (ItemListStatus.Snoozed, "Snoozed"),
+        (ItemListStatus.Done, "Done"),
+        (ItemListStatus.All, "All"),
+    ];
+
+    private enum ItemSort { Due, Priority, Newest, Oldest, Source, Requester, Type }
+
+    private static readonly (ItemSort, string)[] Sorts =
+    [
+        (ItemSort.Due, "Due date"),
+        (ItemSort.Priority, "Priority"),
+        (ItemSort.Newest, "Newest"),
+        (ItemSort.Oldest, "Oldest"),
+        (ItemSort.Source, "Source"),
+        (ItemSort.Requester, "Requester"),
+        (ItemSort.Type, "Type"),
+    ];
+
+    private ItemListStatus _status = ItemListStatus.Active;
+    private ItemSort _sort = ItemSort.Due;
+    private IReadOnlyList<ItemSummary> _items = [];
+    private List<(SourceGroup Group, int Count)> _groups = [];
+    private HashSet<string> _hidden = [];
+    private ItemDetail? _expanded;
+    private string? _error;
+    private string? _query;
+    private string? _newTitle;
+    private ItemType _newType = ItemType.Task;
+    private Priority _newPriority = Priority.Normal;
+    private DateTime? _newDue;
+
+    private DateTime Now => Time.GetUtcNow().UtcDateTime;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _hidden = [.. SettingsStore.Current.Ui.HiddenItemSources];
+        _sort = Enum.TryParse<ItemSort>(SettingsStore.Current.Ui.ItemSort, out var sort) ? sort : ItemSort.Due;
+        Invoker.DataChanged += OnDataChanged;
+        Sync.ItemsChanged += OnSynced;
+        await LoadAsync();
+    }
+
+    private void OnDataChanged(Assistant.Tools.Catalog.ToolDefinition tool, Assistant.Tools.Catalog.ToolCaller caller) =>
+        InvokeAsync(async () =>
+        {
+            await LoadAsync();
+            StateHasChanged();
+        });
+
+    private async Task LoadAsync()
+    {
+        try
+        {
+            // Snoozed items leave Active until they come back (the reminder service reopens them), so snoozing visibly
+            // moves an item to the Snoozed tab.
+            var all = string.IsNullOrWhiteSpace(_query)
+                ? await ItemsService.ListAsync(_status == ItemListStatus.Active ? ItemListStatus.Open : _status)
+                : await ItemsService.SearchAsync(_query, includeClosed: _status is not (ItemListStatus.Active or ItemListStatus.Snoozed));
+            all = _status switch
+            {
+                ItemListStatus.Active => [.. all.Where(i => i.Status != ItemStatus.Snoozed)],
+                ItemListStatus.Snoozed => [.. all.Where(i => i.Status == ItemStatus.Snoozed)],
+                _ => all,
+            };
+
+            // Chips for every source in this view, plus any you've hidden so you can turn them back on.
+            var counts = all.GroupBy(i => SourceGroups.Of(i.Source)).ToDictionary(g => g.Key, g => g.Count());
+            foreach (var key in _hidden)
+            {
+                counts.TryAdd(SourceGroups.Of(key), 0);
+            }
+
+            _groups = [.. counts.OrderBy(c => c.Key.Order).ThenBy(c => c.Key.Label).Select(c => (c.Key, c.Value))];
+            _items = Sort(all.Where(i => !_hidden.Contains(SourceGroups.Of(i.Source).Key)));
+
+            if (_expanded is not null)
+            {
+                _expanded = _items.Any(i => i.Id == _expanded.Id) ? await ItemsService.GetAsync(_expanded.Id) : null;
+            }
+
+            _error = null;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+    }
+
+    private async Task ToggleSource(string key)
+    {
+        if (!_hidden.Remove(key))
+        {
+            _hidden.Add(key);
+        }
+
+        SaveHidden();
+        await LoadAsync();
+    }
+
+    private async Task ShowAllSources()
+    {
+        _hidden.Clear();
+        SaveHidden();
+        await LoadAsync();
+    }
+
+    private async Task SetSortAsync(ChangeEventArgs e)
+    {
+        _sort = Enum.TryParse<ItemSort>(e.Value?.ToString(), out var sort) ? sort : ItemSort.Due;
+        SettingsStore.Update(s => s.Ui.ItemSort = _sort.ToString());
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Every order ends with soonest due, then priority, then newest, so items that tie stay in a sensible order.
+    /// Items without a due date or requester go last.
+    /// </summary>
+    private List<ItemSummary> Sort(IEnumerable<ItemSummary> items)
+    {
+        var ordered = _sort switch
+        {
+            ItemSort.Priority => items.OrderByDescending(i => i.Priority),
+            ItemSort.Newest => items.OrderByDescending(i => i.Id),
+            ItemSort.Oldest => items.OrderBy(i => i.Id),
+            ItemSort.Source => items.OrderBy(i => SourceGroups.Of(i.Source).Order).ThenBy(i => SourceGroups.Of(i.Source).Label),
+            ItemSort.Requester => items.OrderBy(i => string.IsNullOrWhiteSpace(i.Requester)).ThenBy(i => i.Requester, StringComparer.CurrentCultureIgnoreCase),
+            ItemSort.Type => items.OrderBy(i => Formatting.TypeLabel(i.Type), StringComparer.CurrentCultureIgnoreCase),
+            _ => items.OrderBy(_ => 0),
+        };
+
+        return [.. ordered
+            .ThenBy(i => i.DueAt is null)
+            .ThenBy(i => i.DueAt)
+            .ThenByDescending(i => i.Priority)
+            .ThenByDescending(i => i.Id)];
+    }
+
+    private void SaveHidden()
+    {
+        var hidden = _hidden.Order().ToList();
+        SettingsStore.Update(s => s.Ui.HiddenItemSources = hidden);
+    }
+
+    private async Task SetStatusAsync(ItemListStatus status)
+    {
+        _status = status;
+        await LoadAsync();
+    }
+
+    private async Task AddAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_newTitle))
+        {
+            return;
+        }
+
+        DateTimeOffset? due = _newDue is null ? null : new DateTimeOffset(DateTime.SpecifyKind(_newDue.Value, DateTimeKind.Local));
+        await ActAsync(() => ItemsService.CreateAsync(_newTitle, _newType, due, _newPriority, null));
+        _newTitle = null;
+        _newDue = null;
+    }
+
+    private async Task ToggleAsync(int id)
+    {
+        _expanded = _expanded?.Id == id ? null : await ItemsService.GetAsync(id);
+    }
+
+    private async Task AddNoteAsync(string text)
+    {
+        if (_expanded is not null)
+        {
+            await ActAsync(() => ItemsService.AddNoteAsync(_expanded.Id, text));
+        }
+    }
+
+    private Task SplitAsync(int duplicateId) => ActAsync(() => ItemsService.SplitAsync(duplicateId));
+
+    private async Task ActAsync(Func<Task<ItemDetail>> action)
+    {
+        try
+        {
+            await action();
+            _error = null;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task FeedbackAsync(int id, bool useful)
+    {
+        try
+        {
+            await ItemsService.FeedbackAsync(id, useful);
+            _error = null;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+
+        await LoadAsync();
+    }
+
+    private Task HandToClaudeAsync(int id) => ActAsync(async () =>
+    {
+        var folder = await Claude.HandToClaudeAsync(id);
+        return await ItemsService.AddNoteAsync(id, $"Handed to Claude Code in {folder}.");
+    });
+
+    private DateTimeOffset TomorrowMorning()
+    {
+        var now = Time.GetLocalNow();
+        return new DateTimeOffset(now.Date.AddDays(1).AddHours(9), now.Offset);
+    }
+
+    private void OnSynced(string connectorId) => OnDataChanged(null!, null!);
+
+    public void Dispose()
+    {
+        Invoker.DataChanged -= OnDataChanged;
+        Sync.ItemsChanged -= OnSynced;
+    }
+}

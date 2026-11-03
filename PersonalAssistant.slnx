@@ -1,0 +1,23 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Assistant.Actions/Assistant.Actions.csproj" />
+    <Project Path="src/Assistant.Agent/Assistant.Agent.csproj" />
+    <Project Path="src/Assistant.App/Assistant.App.csproj" />
+    <Project Path="src/Assistant.Connectors.Atlassian/Assistant.Connectors.Atlassian.csproj" />
+    <Project Path="src/Assistant.Connectors.Slack/Assistant.Connectors.Slack.csproj" />
+    <Project Path="src/Assistant.Connectors.GitHub/Assistant.Connectors.GitHub.csproj" />
+    <Project Path="src/Assistant.Connectors.Microsoft/Assistant.Connectors.Microsoft.csproj" />
+    <Project Path="src/Assistant.Core/Assistant.Core.csproj" />
+    <Project Path="src/Assistant.Data/Assistant.Data.csproj" />
+    <Project Path="src/Assistant.Mcp.Stdio/Assistant.Mcp.Stdio.csproj" />
+    <Project Path="src/Assistant.Mcp/Assistant.Mcp.csproj" />
+    <Project Path="src/Assistant.Tools/Assistant.Tools.csproj" />
+    <Project Path="src/Assistant.Web/Assistant.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Assistant.Mcp.Tests/Assistant.Mcp.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Assistant.Eval/Assistant.Eval.csproj" />
+  </Folder>
+</Solution>

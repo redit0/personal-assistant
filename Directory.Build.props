@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Authors>redit0</Authors>
+    <Product>Personal Assistant</Product>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+</Project>

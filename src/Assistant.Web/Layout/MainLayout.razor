@@ -1,0 +1,30 @@
+@inherits LayoutComponentBase
+@implements IDisposable
+@inject NavigationBridge Bridge
+@inject NavigationManager Nav
+
+<div class="shell">
+    <nav class="sidebar" aria-label="Main">
+        <div class="brand">
+            <img class="brand-mark" src="_content/Assistant.Web/logo.png" alt="" />
+            <span>Assistant</span>
+        </div>
+        <NavLink class="nav-link" href="today">Today</NavLink>
+        <NavLink class="nav-link" href="" Match="NavLinkMatch.All">Items</NavLink>
+        <NavLink class="nav-link" href="chat">Chat</NavLink>
+        <NavLink class="nav-link" href="connectors">Connectors</NavLink>
+        <NavLink class="nav-link" href="activity">Activity</NavLink>
+        <NavLink class="nav-link" href="settings">Settings</NavLink>
+    </nav>
+    <main class="content">
+        @Body
+    </main>
+</div>
+
+@code {
+    protected override void OnInitialized() => Bridge.NavigateRequested += OnNavigateRequested;
+
+    private void OnNavigateRequested(string path) => InvokeAsync(() => Nav.NavigateTo(path));
+
+    public void Dispose() => Bridge.NavigateRequested -= OnNavigateRequested;
+}

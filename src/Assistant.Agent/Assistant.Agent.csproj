@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Anthropic" Version="13.3.0" />
+    <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.11.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.11.0" />
+    <PackageReference Include="OllamaSharp" Version="5.5.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Assistant.Tools\Assistant.Tools.csproj" />
+    <ProjectReference Include="..\Assistant.Connectors.Microsoft\Assistant.Connectors.Microsoft.csproj" />
+    <ProjectReference Include="..\Assistant.Connectors.Slack\Assistant.Connectors.Slack.csproj" />
+  </ItemGroup>
+
+</Project>

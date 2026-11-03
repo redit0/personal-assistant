@@ -1,0 +1,26 @@
+{
+  "manifest_version": "0.3",
+  "name": "personal-assistant",
+  "display_name": "Personal Assistant",
+  "version": "0.1.0",
+  "description": "Your asks, commitments, reviews, and deadlines from the Personal Assistant tray app.",
+  "long_description": "Connects Claude to the Personal Assistant tray app running on this computer. Claude can list and search what you've been asked to do, see the context behind a request, find the local repo to work in, and record what it did. The tray app must be running. Calls go through its permission settings, approval prompts, and audit log.",
+  "author": {
+    "name": "redit0"
+  },
+  "icon": "icon.png",
+  "server": {
+    "type": "binary",
+    "entry_point": "server/assistant-mcp.exe",
+    "mcp_config": {
+      "command": "${__dirname}/server/assistant-mcp.exe",
+      "args": [],
+      "env": {}
+    }
+  },
+  "tools_generated": true,
+  "keywords": ["tasks", "reminders", "productivity", "personal assistant"],
+  "compatibility": {
+    "platforms": ["win32"]
+  }
+}

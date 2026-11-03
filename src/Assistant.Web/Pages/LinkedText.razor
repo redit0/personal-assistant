@@ -1,0 +1,17 @@
+@* Shows plain text with its http and https links clickable. Links open in your default browser. *@
+@foreach (var segment in LinkText.Split(Text))
+{
+    if (segment.Url is { } url)
+    {
+        <a href="@url" target="_blank" rel="noopener noreferrer" title="@url">@segment.Text</a>
+    }
+    else
+    {
+        @segment.Text
+    }
+}
+
+@code {
+    [Parameter]
+    public string? Text { get; set; }
+}

@@ -1,0 +1,51 @@
+@using Assistant.Tools.Sync
+@inject TimeProvider Time
+
+@if (Status is { } s)
+{
+    <div class="connector-header">
+        <h2>@s.DisplayName</h2>
+        <span class="status-dot @DotClass(s)"></span>
+        <span class="muted small">@Summary(s)</span>
+        <button class="subtle" @onclick="OnSync" disabled="@(s.Running || s.NotReadyReason is not null)">@(s.Running ? "Syncing…" : "Sync now")</button>
+    </div>
+    @if (s.LastError is not null)
+    {
+        <div class="banner error">@s.LastError</div>
+    }
+    @foreach (var warning in s.Warnings)
+    {
+        <div class="banner">@warning</div>
+    }
+}
+
+@code {
+    [Parameter]
+    public ConnectorStatus? Status { get; set; }
+
+    [Parameter]
+    public EventCallback OnSync { get; set; }
+
+    private static string DotClass(ConnectorStatus s) =>
+        s.NotReadyReason is not null ? "idle" : s.LastError is not null ? "off" : s.LastSuccess is not null ? "on" : "idle";
+
+    private string Summary(ConnectorStatus s)
+    {
+        if (s.NotReadyReason is not null)
+        {
+            return s.NotReadyReason;
+        }
+
+        if (s.Running)
+        {
+            return "Syncing…";
+        }
+
+        if (s.LastSuccess is { } last)
+        {
+            return $"{s.OpenItems ?? 0} open · synced {Formatting.Relative(last, Time.GetUtcNow().UtcDateTime)}";
+        }
+
+        return s.LastError is not null ? "Last sync failed" : "Waiting for first sync";
+    }
+}

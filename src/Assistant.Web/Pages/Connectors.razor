@@ -1,0 +1,904 @@
+@page "/connectors"
+@using Assistant.Connectors.GitHub
+@using Assistant.Connectors.Microsoft
+@using Assistant.Core.Secrets
+@using Assistant.Core.Settings
+@using Assistant.Tools.Sync
+@implements IDisposable
+@inject UserSettingsStore SettingsStore
+@inject ISecretStore Secrets
+@inject ConnectorSyncService Sync
+@inject IGitHubCliToken GhCli
+@inject AzureDevOpsConnector AzureDevOps
+@inject MicrosoftAuthService MicrosoftAuth
+@inject TimeProvider Time
+@inject IClipboardService Clipboard
+@inject IAzureCliToken AzureCli
+@inject GraphClient Graph
+
+<header class="page-header">
+    <h1>Connectors</h1>
+    <div class="inline">
+        @if (_saved is not null)
+        {
+            <span class="toast" role="status">@_saved</span>
+        }
+        <button @onclick="() => Sync.RequestSync()">Sync all now</button>
+    </div>
+</header>
+
+<p class="muted">
+    Connectors check each source every few minutes and keep your item list in step: new review requests and
+    assignments appear, and items close themselves when the PR merges or the ticket is done.
+</p>
+
+@* ---------- GitHub ---------- *@
+<section class="card">
+    <ConnectorHeader Status="Status(GitHubId)" OnSync="() => Sync.RequestSync(GitHubId)" />
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" @bind="_settings.GitHub.Enabled" /> Watch github.com</label>
+
+        <label for="ghtoken">Personal access token</label>
+        <input id="ghtoken" type="password" autocomplete="off" @bind="_githubToken"
+               placeholder="@(HasSecret(SecretNames.GitHubToken) ? "Saved. Enter a new token to replace it." : "github_pat_…")" />
+
+        <label>GitHub CLI</label>
+        <label class="check">
+            <input type="checkbox" @bind="_settings.GitHub.UseGhCli" />
+            Use the GitHub CLI login when no token is saved
+            <span class="muted">(@(GhCli.IsAvailable ? "gh is installed" : "gh not found"))</span>
+        </label>
+
+        <label for="ghint">Check every (minutes)</label>
+        <input id="ghint" type="number" min="1" @bind="_settings.GitHub.IntervalMinutes" />
+    </div>
+    <p class="muted small">
+        Token: create a fine-grained token at github.com → Settings → Developer settings, with read-only access to
+        the repos you work in (Pull requests, Issues, Metadata; give Pull requests and Issues read and write if agents
+        should open PRs and comment). The GitHub CLI login already has write access. If your org uses SSO, authorize the token for it.
+    </p>
+    <div class="actions">
+        <button class="primary" @onclick="SaveGitHub">Save</button>
+        @if (HasSecret(SecretNames.GitHubToken))
+        {
+            <button class="subtle" @onclick="() => RemoveSecret(SecretNames.GitHubToken)">Remove token</button>
+        }
+    </div>
+</section>
+
+@* ---------- Atlassian ---------- *@
+<section class="card">
+    <ConnectorHeader Status="Status(JiraId)" OnSync="() => Sync.RequestSync(JiraId)" />
+    <ConnectorHeader Status="Status(BitbucketId)" OnSync="() => Sync.RequestSync(BitbucketId)" />
+
+    <div class="form-grid">
+        <label for="atemail">Atlassian email</label>
+        <input id="atemail" type="email" @bind="_settings.Atlassian.Email" placeholder="you@company.com" />
+
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Atlassian.JiraEnabled" /> Watch Jira Cloud</label>
+        <label for="jirasite">Jira site</label>
+        <input id="jirasite" @bind="_settings.Atlassian.JiraSiteUrl" placeholder="https://yourcompany.atlassian.net" />
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Atlassian.JiraActiveSprintOnly" /> Only issues in an active sprint (issues in Kanban projects, which have no sprints, are left out)</label>
+        <label for="jiratoken">Jira API token</label>
+        <input id="jiratoken" type="password" autocomplete="off" @bind="_jiraToken"
+               placeholder="@(HasSecret(SecretNames.JiraApiToken) ? "Saved. Enter a new token to replace it." : "Paste token")" />
+
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Atlassian.BitbucketEnabled" /> Watch Bitbucket Cloud</label>
+        <label for="bbtoken">Bitbucket API token</label>
+        <input id="bbtoken" type="password" autocomplete="off" @bind="_bitbucketToken"
+               placeholder="@(HasSecret(SecretNames.BitbucketApiToken) ? "Saved. Enter a new token to replace it." : "Paste token")" />
+        <label for="bbdays">Check repos active in the last (days)</label>
+        <input id="bbdays" type="number" min="1" @bind="_settings.Atlassian.BitbucketActiveRepoDays" />
+
+        <label for="atint">Check every (minutes)</label>
+        <input id="atint" type="number" min="1" @bind="_settings.Atlassian.IntervalMinutes" />
+    </div>
+    <p class="muted small">
+        Tokens: at id.atlassian.com → Security → API tokens. For Jira, create an API token. For Bitbucket, create an
+        API token with scopes, choose Bitbucket, and grant read:user, read:workspace, read:repository, and
+        read:pullrequest, plus write:pullrequest and write:repository if agents should open and review PRs. Classic Jira
+        tokens act with your own permissions and now expire after at most a year, so expect to renew them.
+    </p>
+    <div class="actions">
+        <button class="primary" @onclick="SaveAtlassian">Save</button>
+    </div>
+</section>
+
+@* ---------- Azure DevOps ---------- *@
+<section class="card">
+    <ConnectorHeader Status="Status(AzureDevOpsId)" OnSync="() => Sync.RequestSync(AzureDevOpsId)" />
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" @bind="_settings.AzureDevOps.Enabled" /> Watch Azure DevOps</label>
+        <label class="check span-2"><input type="checkbox" @bind="_settings.AzureDevOps.WatchNewOrganizations" /> Watch organizations I join later automatically</label>
+        <label for="adoint">Check every (minutes)</label>
+        <input id="adoint" type="number" min="1" @bind="_settings.AzureDevOps.IntervalMinutes" />
+    </div>
+    <p class="muted small">
+        Uses your Microsoft sign-in. Your Entra app registration needs the Azure DevOps API permission
+        (user_impersonation) added under API permissions. Then click Connect once.
+    </p>
+    <div class="actions">
+        <button class="primary" @onclick="SaveAzureDevOps">Save</button>
+        <button @onclick="ConnectAzureDevOpsAsync" disabled="@_adoBusy">Connect</button>
+        <button @onclick="DiscoverAsync" disabled="@_adoBusy">@(_adoBusy ? "Working…" : "Find organizations")</button>
+        @if (_adoMessage is not null)
+        {
+            <span class="@(_adoError ? "error-text" : "muted")">@_adoMessage</span>
+        }
+    </div>
+
+    <h3>Client tenants</h3>
+    <p class="muted small">
+        For organizations in a client's tenant where you're a guest. These sign in through the Azure CLI
+        (@(AzureCli.IsAvailable ? "installed" : "not found; install it first")), so the client doesn't have to approve
+        anything. Run the az login command for each tenant once; run it again when the sign-in expires.
+    </p>
+    @if (_settings.AzureDevOps.Tenants.Count > 0)
+    {
+        <table class="grid">
+            <thead><tr><th>Client</th><th>Sign in once with</th><th></th></tr></thead>
+            <tbody>
+                @foreach (var tenant in _settings.AzureDevOps.Tenants)
+                {
+                    <tr>
+                        <td>@(tenant.Label ?? tenant.TenantId)<div class="muted small">@tenant.TenantId</div></td>
+                        <td><code>az login --tenant @tenant.TenantId</code></td>
+                        <td class="nowrap">
+                            <button class="subtle" @onclick="() => CopyLogin(tenant.TenantId)">Copy</button>
+                            <button class="subtle" @onclick="() => RemoveTenant(tenant.TenantId)">Remove</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+    <form class="inline" @onsubmit="AddTenant">
+        <input class="grow" placeholder="Tenant ID or domain, such as contoso.onmicrosoft.com" @bind="_newTenantId" aria-label="Tenant ID" />
+        <input placeholder="Client name" @bind="_newTenantLabel" aria-label="Client name" />
+        <button type="submit" disabled="@string.IsNullOrWhiteSpace(_newTenantId)">Add tenant</button>
+    </form>
+
+    <h3>Organizations with an access token</h3>
+    <p class="muted small">
+        A fallback for an organization neither sign-in can reach. In that organization, open User settings → Personal access
+        tokens and create one with Code (Read) and Work Items (Read).
+    </p>
+    <form class="inline" @onsubmit="AddTokenOrganization">
+        <input placeholder="Organization name" @bind="_newTokenOrg" aria-label="Organization name" />
+        <input class="grow" type="password" autocomplete="off" placeholder="Personal access token" @bind="_newTokenValue" aria-label="Personal access token" />
+        <button type="submit" disabled="@(string.IsNullOrWhiteSpace(_newTokenOrg) || string.IsNullOrWhiteSpace(_newTokenValue))">Add organization</button>
+    </form>
+
+    @if (_settings.AzureDevOps.Organizations.Count > 0)
+    {
+        <h3>Organizations</h3>
+        <ul class="plain">
+            @foreach (var org in _settings.AzureDevOps.Organizations.Keys.Order())
+            {
+                var source = _settings.AzureDevOps.OrganizationSources.GetValueOrDefault(org, AzureDevOpsSettings.HomeSource);
+                <li class="org-row">
+                    <label class="check">
+                        <input type="checkbox" checked="@_settings.AzureDevOps.Organizations[org]"
+                               @onchange="e => SetOrganization(org, e.Value is true)" />
+                        dev.azure.com/@org
+                    </label>
+                    <span class="chip">@SourceLabel(source)</span>
+                    @if (source == AzureDevOpsSettings.TokenSource)
+                    {
+                        <button class="subtle" @onclick="() => RemoveTokenOrganization(org)">Remove</button>
+                    }
+                </li>
+            }
+        </ul>
+    }
+</section>
+
+@* ---------- Outlook mail and calendar ---------- *@
+<section class="card">
+    <ConnectorHeader Status="Status(OutlookId)" OnSync="() => Sync.RequestSync(OutlookId)" />
+    <ConnectorHeader Status="Status(FlaggedId)" OnSync="() => Sync.RequestSync(FlaggedId)" />
+    <ConnectorHeader Status="Status(CalendarId)" OnSync="() => Sync.RequestSync(CalendarId)" />
+
+    <p class="muted small">
+        Uses your Microsoft sign-in. Your Entra app registration needs the delegated Microsoft Graph permissions
+        Mail.Read, Calendars.Read, and MailboxSettings.Read. Then click Connect Outlook once. For agents to draft
+        replies, also add Mail.ReadWrite and click Allow drafting replies.
+    </p>
+
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Outlook.MailEnabled" /> Read mail and track asks, promises, and things I'm waiting on</label>
+        <label>Folders</label>
+        <div class="inline">
+            <label class="check"><input type="checkbox" @bind="_settings.Outlook.IncludeInbox" /> Inbox</label>
+            <label class="check"><input type="checkbox" @bind="_settings.Outlook.IncludeSent" /> Sent Items (finds promises you made)</label>
+        </div>
+
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Outlook.FlaggedEnabled" /> Turn flagged messages into items</label>
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Outlook.CalendarEnabled" /> Find meetings to prepare for and deadlines on my calendar</label>
+
+        <label for="calahead">Calendar days ahead</label>
+        <input id="calahead" type="number" min="1" @bind="_settings.Outlook.CalendarDaysAhead" />
+        <label for="backfill">First sync reads mail from the last (days)</label>
+        <input id="backfill" type="number" min="1" @bind="_settings.Outlook.BackfillDays" />
+        <label for="maxthreads">Most threads to triage per sync</label>
+        <input id="maxthreads" type="number" min="1" @bind="_settings.Outlook.MaxThreadsPerSync" />
+        <label for="olint">Check every (minutes)</label>
+        <input id="olint" type="number" min="1" @bind="_settings.Outlook.IntervalMinutes" />
+        <label for="signoff">Sign-off for drafted replies (Outlook doesn't add your signature to these)</label>
+        <textarea id="signoff" rows="3" @bind="_settings.Outlook.EmailSignOff" placeholder="Leave empty for &quot;Thanks,&quot; and your first name"></textarea>
+    </div>
+
+    <div class="actions">
+        <button class="primary" @onclick="SaveOutlook">Save</button>
+        <button @onclick="ConnectOutlookAsync" disabled="@_outlookBusy">Connect Outlook</button>
+        <button @onclick="AllowDraftsAsync" disabled="@_outlookBusy" title="Lets agents save reply drafts in your Drafts folder. Nothing is ever sent.">Allow drafting replies</button>
+        <button @onclick="LoadFoldersAsync" disabled="@_outlookBusy">@(_outlookBusy ? "Working…" : "Choose more folders")</button>
+        @if (_outlookMessage is not null)
+        {
+            <span class="@(_outlookError ? "error-text" : "muted")">@_outlookMessage</span>
+        }
+    </div>
+
+    @if (_folders.Count > 0 || _settings.Outlook.ExtraFolders.Count > 0)
+    {
+        <h3>Extra folders</h3>
+        <ul class="plain">
+            @foreach (var folder in _folders.Count > 0 ? _folders.Select(f => (f.Id, f.Name)) : _settings.Outlook.ExtraFolders.Select(f => (f.Id, f.Name)))
+            {
+                <li>
+                    <label class="check">
+                        <input type="checkbox" checked="@_settings.Outlook.ExtraFolders.Any(f => f.Id == folder.Id)"
+                               @onchange="e => ToggleFolder(folder.Id, folder.Name, e.Value is true)" />
+                        @folder.Name
+                    </label>
+                </li>
+            }
+        </ul>
+    }
+
+    <h3>Triage</h3>
+    <div class="form-grid">
+        <label for="tmodel">Model (Anthropic)</label>
+        <input id="tmodel" @bind="_settings.Triage.Model" placeholder="claude-sonnet-5-5" />
+        <label for="threshold">Send to Needs a look below confidence</label>
+        <input id="threshold" type="number" min="0" max="1" step="0.05" @bind="_settings.Triage.ReviewThreshold" />
+        <label for="profile">About me</label>
+        <textarea id="profile" rows="6" @bind="_settings.Triage.Profile"
+                  placeholder="My role, the people and projects that matter most, what I usually ignore. For example: I'm a principal consultant at Contoso. Requests from clients and from my manager matter most. Ignore vendor pitches and internal social chatter."></textarea>
+        <label for="muted">Never triage mail from (one per line; use @@domain.com for a whole domain)</label>
+        <textarea id="muted" rows="3" @bind="_mutedText"></textarea>
+    </div>
+    <div class="actions">
+        <button class="primary" @onclick="SaveTriage">Save triage settings</button>
+    </div>
+</section>
+
+@* ---------- Teams ---------- *@
+<section class="card">
+    <ConnectorHeader Status="Status(TeamsId)" OnSync="() => Sync.RequestSync(TeamsId)" />
+    <p class="muted small">
+        Uses your Microsoft sign-in and the same triage as email. For chats, add the delegated Graph permission Chat.Read
+        (no admin needed) and click Connect Teams. Channels also need ChannelMessage.Read.All, Team.ReadBasic.All, and
+        Channel.ReadBasic.All; ChannelMessage.Read.All requires admin consent. Only channel threads you posted in or were
+        @@mentioned in are read. To let agents post replies for you (you approve each one), add ChatMessage.Send and
+        ChannelMessage.Send (no admin needed) and click Allow posting.
+    </p>
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Teams.ChatsEnabled" /> Read my chats (one-on-one, group, and meeting chats)</label>
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Teams.ChannelsEnabled" /> Read channel threads that involve me</label>
+        <label for="tmback">First sync reads the last (days)</label>
+        <input id="tmback" type="number" min="1" @bind="_settings.Teams.BackfillDays" />
+        <label for="tmchats">Most chats to read per sync</label>
+        <input id="tmchats" type="number" min="1" @bind="_settings.Teams.MaxChatsPerSync" />
+        <label for="tmthreads">Most conversations to triage per sync</label>
+        <input id="tmthreads" type="number" min="1" @bind="_settings.Teams.MaxThreadsPerSync" />
+        <label for="tmint">Check every (minutes)</label>
+        <input id="tmint" type="number" min="1" @bind="_settings.Teams.IntervalMinutes" />
+    </div>
+    <div class="actions">
+        <button class="primary" @onclick="SaveTeams">Save</button>
+        <button @onclick="ConnectTeamsAsync" disabled="@_m365Busy">Connect Teams</button>
+        <button @onclick="ConnectTeamsChannelsAsync" disabled="@_m365Busy">Connect Teams channels</button>
+        <button @onclick="AllowTeamsPostingAsync" disabled="@_m365Busy" title="Lets agents reply in Teams for you. You approve every message in the tray first.">Allow posting</button>
+        @if (_messages.GetValueOrDefault(TeamsMessage) is { } tm)
+        {
+            <span class="@(tm.Error ? "error-text" : "muted")">@tm.Text</span>
+        }
+    </div>
+</section>
+
+@* ---------- Slack ---------- *@
+<section class="card">
+    <ConnectorHeader Status="Status(SlackId)" OnSync="() => Sync.RequestSync(SlackId)" />
+    <p class="muted small">
+        Create an internal Slack app: go to api.slack.com/apps, choose Create New App, then From scratch, and pick your
+        workspace. Under OAuth &amp; Permissions, add these User Token Scopes: @(Assistant.Connectors.Slack.SlackClient.RequiredScopes). Click Install to
+        Workspace (your workspace admin may need to approve it), then copy the User OAuth Token, which starts with xoxp-. To let
+        agents post replies for you (you approve each one), also add @(Assistant.Connectors.Slack.SlackClient.PostScope) and reinstall the app.
+    </p>
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Slack.Enabled" /> Watch Slack</label>
+        <label for="sltoken">User OAuth Token</label>
+        <input id="sltoken" type="password" autocomplete="off" @bind="_slackToken"
+               placeholder="@(HasSecret(SecretNames.SlackToken) ? "Saved. Enter a new token to replace it." : "xoxp-…")" />
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Slack.IncludeDirectMessages" /> Direct messages and group DMs</label>
+        <label class="check span-2"><input type="checkbox" @bind="_settings.Slack.IncludeMentions" /> Messages anywhere that @@mention me</label>
+        <label for="slback">First sync reads the last (days)</label>
+        <input id="slback" type="number" min="1" @bind="_settings.Slack.BackfillDays" />
+        <label for="slthreads">Most conversations to triage per sync</label>
+        <input id="slthreads" type="number" min="1" @bind="_settings.Slack.MaxThreadsPerSync" />
+        <label for="slint">Check every (minutes)</label>
+        <input id="slint" type="number" min="1" @bind="_settings.Slack.IntervalMinutes" />
+    </div>
+    <div class="actions">
+        <button class="primary" @onclick="SaveSlackAsync" disabled="@_slackBusy">Save</button>
+        <button @onclick="LoadSlackChannelsAsync" disabled="@(_slackBusy || !HasSecret(SecretNames.SlackToken))">@(_slackBusy ? "Working…" : "Choose channels to read in full")</button>
+        @if (HasSecret(SecretNames.SlackToken))
+        {
+            <button class="subtle" @onclick="() => RemoveSecret(SecretNames.SlackToken)">Remove token</button>
+        }
+        @if (_messages.GetValueOrDefault(SlackMessageKey) is { } sm)
+        {
+            <span class="@(sm.Error ? "error-text" : "muted")">@sm.Text</span>
+        }
+    </div>
+    @if (_slackChannels.Count > 0 || _settings.Slack.Channels.Count > 0)
+    {
+        <h3>Channels read in full</h3>
+        <p class="muted small">Every message in these channels goes to triage. Elsewhere, only mentions do.</p>
+        <ul class="plain">
+            @foreach (var channel in _slackChannels.Count > 0 ? _slackChannels : _settings.Slack.Channels.Select(c => (c.Id, c.Name)).ToList())
+            {
+                <li>
+                    <label class="check">
+                        <input type="checkbox" checked="@_settings.Slack.Channels.Any(c => c.Id == channel.Id)"
+                               @onchange="e => ToggleSlackChannel(channel.Id, channel.Name, e.Value is true)" />
+                        #@channel.Name
+                    </label>
+                </li>
+            }
+        </ul>
+    }
+</section>
+
+@* ---------- SharePoint and Work IQ ---------- *@
+<section class="card">
+    <h2>SharePoint and Work IQ</h2>
+    <p class="muted small">
+        Document @@mentions, comment replies, and files shared with you already arrive as email, so Outlook triage picks
+        them up. The settings below let the chat and agents (through the MCP server) search and read your documents.
+    </p>
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" @bind="_settings.SharePoint.DocumentsEnabled" /> Let agents search and read SharePoint and OneDrive files I can open</label>
+    </div>
+    <p class="muted small">
+        Needs the delegated Graph permissions Files.Read.All and Sites.Read.All, which require admin consent. Then click Connect SharePoint.
+    </p>
+
+    <h3>Work IQ</h3>
+    <div class="form-grid">
+        <label class="check span-2"><input type="checkbox" @bind="_settings.WorkIq.Enabled" /> Let agents ask Work IQ about my meetings, mail, chats, and files</label>
+        <label class="check span-2"><input type="checkbox" @bind="_settings.WorkIq.WebGrounding" /> Allow Work IQ to use web results</label>
+    </div>
+    <details class="muted small">
+        <summary>What to ask your Microsoft 365 admin for</summary>
+        <ol>
+            <li>Create the Work IQ service principal in your tenant, once: <code>az ad sp create --id fdcc1f02-fc51-4226-8753-f668596af7f7</code> (a Global Administrator runs this).</li>
+            <li>Add the Work IQ permission WorkIQAgent.Ask to this app's Entra registration (under APIs my organization uses, search for Work IQ) and grant admin consent.</li>
+            <li>Set up Copilot Credits (usage-based billing) in the Microsoft 365 admin center, and add you to a spending policy that includes the Work IQ API.</li>
+        </ol>
+        <p>A Microsoft 365 Copilot license isn't needed. Each question is billed to the organization, and agents are told to keep questions focused.</p>
+    </details>
+
+    <div class="actions">
+        <button class="primary" @onclick="SaveDocuments">Save</button>
+        <button @onclick="ConnectSharePointAsync" disabled="@_m365Busy">Connect SharePoint</button>
+        <button @onclick="ConnectWorkIqAsync" disabled="@_m365Busy">Connect Work IQ</button>
+        @if (_messages.GetValueOrDefault(DocsMessage) is { } dm)
+        {
+            <span class="@(dm.Error ? "error-text" : "muted")">@dm.Text</span>
+        }
+    </div>
+</section>
+
+@code {
+    private const string TeamsId = "teams";
+    private const string SlackId = "slack";
+    private const string TeamsMessage = "teams";
+    private const string SlackMessageKey = "slack";
+    private const string DocsMessage = "docs";
+
+    private readonly Dictionary<string, (string Text, bool Error)> _messages = [];
+    private bool _m365Busy;
+    private bool _slackBusy;
+    private string? _slackToken;
+    private List<(string Id, string Name)> _slackChannels = [];
+
+    [Inject] private Assistant.Connectors.Slack.SlackClient Slack { get; set; } = default!;
+
+    private void SaveTeams()
+    {
+        SettingsStore.Update(s => s.Teams = _settings.Teams);
+        Sync.RequestSync(TeamsId);
+        Refresh("Teams saved");
+    }
+
+    private async Task SaveSlackAsync()
+    {
+        _slackBusy = true;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_slackToken))
+            {
+                var token = _slackToken.Trim();
+                if (!token.StartsWith("xoxp-", StringComparison.Ordinal))
+                {
+                    _messages[SlackMessageKey] = ("That isn't a user token. Copy the User OAuth Token, which starts with xoxp-.", true);
+                    return;
+                }
+
+                var me = await Slack.AuthTestAsync(CancellationToken.None, token);
+                Secrets.Set(SecretNames.SlackToken, token);
+                _slackToken = null;
+                _messages[SlackMessageKey] = ($"Connected to {me.Team} as {me.User}.", false);
+            }
+
+            // Channel choices are saved as you tick them; this saves the rest of the card.
+            var edited = _settings.Slack;
+            SettingsStore.Update(s =>
+            {
+                var channels = s.Slack.Channels;
+                s.Slack = edited;
+                s.Slack.Channels = channels;
+            });
+            Sync.RequestSync(SlackId);
+            Refresh("Slack saved");
+        }
+        catch (Exception ex)
+        {
+            _messages[SlackMessageKey] = (ex.Message, true);
+        }
+        finally
+        {
+            _slackBusy = false;
+        }
+    }
+
+    private async Task LoadSlackChannelsAsync()
+    {
+        _slackBusy = true;
+        try
+        {
+            _slackChannels = (await Slack.GetMyConversationsAsync("public_channel,private_channel", CancellationToken.None))
+                .Select(c => (c.Id, c.Name ?? c.Id))
+                .OrderBy(c => c.Item2, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            _messages[SlackMessageKey] = ($"{_slackChannels.Count} channels you're in. Tick the ones to read in full.", false);
+        }
+        catch (Exception ex)
+        {
+            _messages[SlackMessageKey] = (ex.Message, true);
+        }
+        finally
+        {
+            _slackBusy = false;
+        }
+    }
+
+    private void ToggleSlackChannel(string id, string name, bool watched)
+    {
+        SettingsStore.Update(s =>
+        {
+            s.Slack.Channels.RemoveAll(c => c.Id == id);
+            if (watched)
+            {
+                s.Slack.Channels.Add(new SlackChannelChoice { Id = id, Name = name });
+            }
+        });
+        _settings.Slack.Channels = SettingsStore.Current.Slack.Channels;
+        Sync.RequestSync(SlackId);
+    }
+
+    private void SaveDocuments()
+    {
+        SettingsStore.Update(s =>
+        {
+            s.SharePoint = _settings.SharePoint;
+            s.WorkIq = _settings.WorkIq;
+        });
+        Refresh("Saved");
+    }
+
+    private Task ConnectTeamsAsync() => ConsentAsync(GraphClient.TeamsChatScopes, TeamsMessage, "Connected. Turn on chats above and click Save.");
+
+    private Task ConnectTeamsChannelsAsync() => ConsentAsync(GraphClient.TeamsChannelScopes, TeamsMessage, "Channels connected. Turn them on above and click Save.");
+
+    private Task AllowTeamsPostingAsync() => ConsentAsync(GraphClient.TeamsSendScopes, TeamsMessage, "Posting allowed. Agents still ask you before every message.");
+
+    private Task ConnectSharePointAsync() => ConsentAsync(GraphClient.FileScopes, DocsMessage, "SharePoint connected. Turn it on above and click Save.");
+
+    private Task ConnectWorkIqAsync() => ConsentAsync(WorkIqClient.Scopes, DocsMessage, "Work IQ connected. Turn it on above and click Save.");
+
+    private async Task ConsentAsync(string[] scopes, string messageKey, string success)
+    {
+        _m365Busy = true;
+        _messages.Remove(messageKey);
+        try
+        {
+            await MicrosoftAuth.ConsentAsync(scopes);
+            _messages[messageKey] = (success, false);
+        }
+        catch (Exception ex)
+        {
+            _messages[messageKey] = (ex.Message, true);
+        }
+        finally
+        {
+            _m365Busy = false;
+        }
+    }
+}
+
+@code {
+    private const string OutlookId = "outlook";
+    private const string FlaggedId = "outlook-flagged";
+    private const string CalendarId = "calendar";
+
+    private List<GraphFolder> _folders = [];
+    private string? _mutedText;
+    private bool _outlookBusy;
+    private string? _outlookMessage;
+    private bool _outlookError;
+
+    private void SaveOutlook()
+    {
+        // Folder choices are saved as you tick them; this saves the rest of the card.
+        var edited = _settings.Outlook;
+        SettingsStore.Update(s =>
+        {
+            var folders = s.Outlook.ExtraFolders;
+            s.Outlook = edited;
+            s.Outlook.ExtraFolders = folders;
+        });
+        Sync.RequestSync(OutlookId);
+        Sync.RequestSync(FlaggedId);
+        Sync.RequestSync(CalendarId);
+        Refresh("Outlook saved");
+    }
+
+    private void SaveTriage()
+    {
+        _settings.Triage.MutedSenders = [.. (_mutedText ?? "")
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(s => s.Contains('@'))];
+        _settings.Triage.ReviewThreshold = Math.Clamp(_settings.Triage.ReviewThreshold, 0, 1);
+        SettingsStore.Update(s => s.Triage = _settings.Triage);
+        Refresh("Triage settings saved");
+    }
+
+    private async Task ConnectOutlookAsync() => await RunOutlookAsync(async () =>
+    {
+        await MicrosoftAuth.ConsentAsync(GraphClient.Scopes);
+        return "Connected. Turn on what you want above and click Save.";
+    });
+
+    private async Task AllowDraftsAsync() => await RunOutlookAsync(async () =>
+    {
+        await MicrosoftAuth.ConsentAsync(GraphClient.WriteScopes);
+        return "Agents can now save reply drafts. Nothing is sent without you.";
+    });
+
+    private async Task LoadFoldersAsync() => await RunOutlookAsync(async () =>
+    {
+        _folders = (await Graph.GetFoldersAsync(CancellationToken.None))
+            .Where(f => !BuiltInFolders.Contains(f.Name))
+            .OrderBy(f => f.Name)
+            .ToList();
+        return $"{_folders.Count} folders. Tick the ones to watch.";
+    });
+
+    private static readonly HashSet<string> BuiltInFolders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Inbox", "Sent Items", "Drafts", "Deleted Items", "Junk Email", "Outbox", "Archive", "Conversation History", "Sync Issues",
+    };
+
+    private void ToggleFolder(string id, string name, bool watched)
+    {
+        SettingsStore.Update(s =>
+        {
+            s.Outlook.ExtraFolders.RemoveAll(f => f.Id == id);
+            if (watched)
+            {
+                s.Outlook.ExtraFolders.Add(new MailFolderChoice { Id = id, Name = name });
+            }
+        });
+        _settings.Outlook.ExtraFolders = SettingsStore.Current.Outlook.ExtraFolders;
+    }
+
+    private async Task RunOutlookAsync(Func<Task<string>> action)
+    {
+        _outlookBusy = true;
+        _outlookMessage = null;
+        try
+        {
+            _outlookMessage = await action();
+            _outlookError = false;
+        }
+        catch (Exception ex)
+        {
+            _outlookMessage = ex.Message;
+            _outlookError = true;
+        }
+        finally
+        {
+            _outlookBusy = false;
+        }
+    }
+
+    private const string GitHubId = "github";
+    private const string JiraId = "jira";
+    private const string BitbucketId = "bitbucket";
+    private const string AzureDevOpsId = "azuredevops";
+
+    private UserSettings _settings = new();
+    private IReadOnlyList<ConnectorStatus> _statuses = [];
+    private string? _githubToken;
+    private string? _jiraToken;
+    private string? _bitbucketToken;
+    private string? _saved;
+    private bool _adoBusy;
+    private string? _adoMessage;
+    private string? _newTenantId;
+    private string? _newTenantLabel;
+    private string? _newTokenOrg;
+    private string? _newTokenValue;
+    private bool _adoError;
+
+    protected override void OnInitialized()
+    {
+        _settings = SettingsStore.Current;
+        _mutedText = string.Join('\n', _settings.Triage.MutedSenders);
+        _statuses = Sync.GetStatuses();
+        Sync.StatusChanged += OnStatusChanged;
+    }
+
+    private void OnStatusChanged() => InvokeAsync(() =>
+    {
+        _statuses = Sync.GetStatuses();
+        StateHasChanged();
+    });
+
+    private ConnectorStatus? Status(string id) => _statuses.FirstOrDefault(s => s.Id == id);
+
+    private bool HasSecret(string name) => !string.IsNullOrEmpty(Secrets.Get(name));
+
+    private void SaveSecret(string name, ref string? value)
+    {
+        if (!string.IsNullOrWhiteSpace(value))
+        {
+            Secrets.Set(name, value.Trim());
+        }
+
+        value = null;
+    }
+
+    private void RemoveSecret(string name)
+    {
+        Secrets.Delete(name);
+        Refresh("Token removed");
+    }
+
+    private void SaveGitHub()
+    {
+        SaveSecret(SecretNames.GitHubToken, ref _githubToken);
+        SettingsStore.Update(s => s.GitHub = _settings.GitHub);
+        Sync.RequestSync(GitHubId);
+        Refresh("GitHub saved");
+    }
+
+    private void SaveAtlassian()
+    {
+        SaveSecret(SecretNames.JiraApiToken, ref _jiraToken);
+        SaveSecret(SecretNames.BitbucketApiToken, ref _bitbucketToken);
+        _settings.Atlassian.JiraSiteUrl = _settings.Atlassian.JiraSiteUrl?.Trim().TrimEnd('/');
+        SettingsStore.Update(s => s.Atlassian = _settings.Atlassian);
+        Sync.RequestSync(JiraId);
+        Sync.RequestSync(BitbucketId);
+        Refresh("Atlassian saved");
+    }
+
+    private void SaveAzureDevOps()
+    {
+        // Only copy what this card edits. Discovery may have added organizations in the background.
+        var edited = _settings.AzureDevOps;
+        SettingsStore.Update(s =>
+        {
+            s.AzureDevOps.Enabled = edited.Enabled;
+            s.AzureDevOps.WatchNewOrganizations = edited.WatchNewOrganizations;
+            s.AzureDevOps.IntervalMinutes = edited.IntervalMinutes;
+            foreach (var (org, watched) in edited.Organizations.Where(o => s.AzureDevOps.Organizations.ContainsKey(o.Key)))
+            {
+                s.AzureDevOps.Organizations[org] = watched;
+            }
+        });
+        Sync.RequestSync(AzureDevOpsId);
+        Refresh("Azure DevOps saved");
+    }
+
+    private void SetOrganization(string org, bool watched)
+    {
+        _settings.AzureDevOps.Organizations[org] = watched;
+        SaveAzureDevOps();
+    }
+
+    private async Task ConnectAzureDevOpsAsync()
+    {
+        await RunAdoAsync(async () =>
+        {
+            await MicrosoftAuth.ConsentAsync(AzureDevOpsConnector.Scopes);
+            return "Connected. Click Find organizations next.";
+        });
+    }
+
+    private async Task DiscoverAsync()
+    {
+        await RunAdoAsync(async () =>
+        {
+            var result = await AzureDevOps.RefreshOrganizationsAsync(CancellationToken.None);
+            _settings = SettingsStore.Current;
+            var summary = result.Found == 0 ? "No organizations found." : $"Found {result.Found} organization{(result.Found == 1 ? "" : "s")}.";
+            if (result.Errors.Count > 0)
+            {
+                _adoError = true;
+                throw new InvalidOperationException(summary + " " + string.Join(" ", result.Errors));
+            }
+
+            return summary;
+        });
+    }
+
+    private void AddTenant()
+    {
+        var tenantId = _newTenantId?.Trim();
+        if (string.IsNullOrEmpty(tenantId))
+        {
+            return;
+        }
+
+        if (!AzureCliToken.IsValidTenant(tenantId))
+        {
+            _adoMessage = $"'{tenantId}' isn't a tenant ID or domain.";
+            _adoError = true;
+            return;
+        }
+
+        SettingsStore.Update(s =>
+        {
+            if (!s.AzureDevOps.Tenants.Any(t => string.Equals(t.TenantId, tenantId, StringComparison.OrdinalIgnoreCase)))
+            {
+                s.AzureDevOps.Tenants.Add(new AzureDevOpsTenant
+                {
+                    TenantId = tenantId,
+                    Label = string.IsNullOrWhiteSpace(_newTenantLabel) ? null : _newTenantLabel.Trim(),
+                });
+            }
+        });
+
+        _adoMessage = $"Added. Run az login --tenant {tenantId} in a terminal, then click Find organizations.";
+        _adoError = false;
+        _newTenantId = null;
+        _newTenantLabel = null;
+        _settings = SettingsStore.Current;
+    }
+
+    private void RemoveTenant(string tenantId)
+    {
+        var source = AzureDevOpsSettings.TenantSource(tenantId);
+        SettingsStore.Update(s =>
+        {
+            s.AzureDevOps.Tenants.RemoveAll(t => string.Equals(t.TenantId, tenantId, StringComparison.OrdinalIgnoreCase));
+            foreach (var org in s.AzureDevOps.OrganizationSources.Where(o => o.Value == source).Select(o => o.Key).ToList())
+            {
+                s.AzureDevOps.OrganizationSources.Remove(org);
+                s.AzureDevOps.Organizations.Remove(org);
+            }
+        });
+        Refresh("Tenant removed");
+    }
+
+    private void AddTokenOrganization()
+    {
+        var org = _newTokenOrg?.Trim().Trim('/');
+        if (string.IsNullOrEmpty(org) || string.IsNullOrWhiteSpace(_newTokenValue))
+        {
+            return;
+        }
+
+        // Accept a pasted URL like https://dev.azure.com/contoso.
+        if (Uri.TryCreate(org, UriKind.Absolute, out var url))
+        {
+            org = url.AbsolutePath.Trim('/').Split('/')[0];
+        }
+
+        Secrets.Set(SecretNames.AzureDevOpsToken(org), _newTokenValue.Trim());
+        SettingsStore.Update(s =>
+        {
+            s.AzureDevOps.Organizations[org] = true;
+            s.AzureDevOps.OrganizationSources[org] = AzureDevOpsSettings.TokenSource;
+        });
+
+        _newTokenOrg = null;
+        _newTokenValue = null;
+        Sync.RequestSync(AzureDevOpsId);
+        Refresh($"{org} added");
+    }
+
+    private void RemoveTokenOrganization(string org)
+    {
+        Secrets.Delete(SecretNames.AzureDevOpsToken(org));
+        SettingsStore.Update(s =>
+        {
+            s.AzureDevOps.Organizations.Remove(org);
+            s.AzureDevOps.OrganizationSources.Remove(org);
+        });
+        Refresh($"{org} removed");
+    }
+
+    private void CopyLogin(string tenantId)
+    {
+        Clipboard.SetText($"az login --tenant {tenantId}");
+        Refresh("Command copied");
+    }
+
+    private string SourceLabel(string source)
+    {
+        if (source == AzureDevOpsSettings.TokenSource)
+        {
+            return "access token";
+        }
+
+        if (source.StartsWith("tenant:", StringComparison.Ordinal))
+        {
+            var id = source["tenant:".Length..];
+            return _settings.AzureDevOps.Tenants.FirstOrDefault(t => t.TenantId == id)?.Label ?? id;
+        }
+
+        return "home tenant";
+    }
+
+    private async Task RunAdoAsync(Func<Task<string>> action)
+    {
+        _adoBusy = true;
+        _adoMessage = null;
+        try
+        {
+            _adoMessage = await action();
+            _adoError = false;
+        }
+        catch (Exception ex)
+        {
+            _adoMessage = ex.Message;
+            _adoError = true;
+        }
+        finally
+        {
+            _adoBusy = false;
+        }
+    }
+
+    private async void Refresh(string message)
+    {
+        _settings = SettingsStore.Current;
+        _statuses = Sync.GetStatuses();
+        _saved = message;
+        StateHasChanged();
+        await Task.Delay(2500);
+        if (_saved == message)
+        {
+            _saved = null;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    public void Dispose() => Sync.StatusChanged -= OnStatusChanged;
+}

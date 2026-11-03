@@ -1,0 +1,139 @@
+@page "/chat"
+@using Microsoft.Extensions.AI
+@inject Assistant.Agent.ChatSession Session
+@inject NavigationManager Nav
+
+<header class="page-header">
+    <h1>Chat</h1>
+    <button class="subtle" @onclick="Clear" disabled="@(_busy || Session.History.Count == 0)">New conversation</button>
+</header>
+
+@if (Session.UnavailableReason is { } reason)
+{
+    <div class="banner">
+        @reason <a href="settings" @onclick:preventDefault @onclick="@(() => Nav.NavigateTo("settings"))">Open Settings</a>
+    </div>
+}
+
+<div class="chat-log" aria-live="polite">
+    @if (Session.History.Count == 0 && _pending is null)
+    {
+        <div class="empty">
+            <p>Ask about your workload, for example:</p>
+            <ul class="plain suggestions">
+                @foreach (var s in Suggestions)
+                {
+                    <li><button class="link" @onclick="() => SendAsync(s)">@s</button></li>
+                }
+            </ul>
+        </div>
+    }
+
+    @foreach (var message in Session.History.Where(m => m.Role == ChatRole.User || (m.Role == ChatRole.Assistant && !string.IsNullOrWhiteSpace(m.Text))))
+    {
+        if (message.Role == ChatRole.User)
+        {
+            <div class="bubble user">@message.Text</div>
+        }
+        else
+        {
+            <div class="bubble assistant md">@MarkdownText.ToHtml(message.Text)</div>
+        }
+    }
+
+    @if (_pending is not null)
+    {
+        <div class="bubble assistant md">
+            @if (_tools.Count > 0)
+            {
+                <div class="tool-activity">Using: @string.Join(", ", _tools)</div>
+            }
+            @if (_pending.Length == 0)
+            {
+                <span class="muted">Thinking…</span>
+            }
+            else
+            {
+                @MarkdownText.ToHtml(_pending.ToString())
+            }
+        </div>
+    }
+
+    @if (_error is not null)
+    {
+        <div class="banner error" role="alert">@_error</div>
+    }
+</div>
+
+<form class="chat-input" @onsubmit="() => SendAsync(_input)">
+    <textarea rows="2" placeholder="Ask the assistant" @bind="_input" @bind:event="oninput" disabled="@_busy"
+              @onkeydown="OnKeyDownAsync" aria-label="Message"></textarea>
+    <button type="submit" class="primary" disabled="@(_busy || string.IsNullOrWhiteSpace(_input) || Session.UnavailableReason is not null)">Send</button>
+</form>
+
+@code {
+    private static readonly string[] Suggestions =
+    [
+        "What does my day look like?",
+        "What am I waiting on from other people?",
+        "Find me an hour of focus time this week",
+        "Remind me tomorrow at 10am to follow up with Dana if she hasn't replied",
+    ];
+
+    private string? _input;
+    private System.Text.StringBuilder? _pending;
+    private readonly List<string> _tools = [];
+    private string? _error;
+    private bool _busy;
+
+    private async Task OnKeyDownAsync(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !e.ShiftKey)
+        {
+            await SendAsync(_input);
+        }
+    }
+
+    private async Task SendAsync(string? text)
+    {
+        if (_busy || string.IsNullOrWhiteSpace(text) || Session.UnavailableReason is not null)
+        {
+            return;
+        }
+
+        _busy = true;
+        _error = null;
+        _input = null;
+        _pending = new();
+        _tools.Clear();
+
+        try
+        {
+            await foreach (var update in Session.SendAsync(text.Trim()))
+            {
+                if (update.ToolTitle is { } tool && !_tools.Contains(tool))
+                {
+                    _tools.Add(tool);
+                }
+
+                _pending.Append(update.Text);
+                StateHasChanged();
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _pending = null;
+            _busy = false;
+        }
+    }
+
+    private void Clear()
+    {
+        Session.Clear();
+        _error = null;
+    }
+}
