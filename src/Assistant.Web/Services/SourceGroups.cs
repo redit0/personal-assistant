@@ -6,6 +6,15 @@ public sealed record SourceGroup(string Key, string Label, int Order);
 /// <summary>Groups item sources into the filters shown on the Items page.</summary>
 public static class SourceGroups
 {
+    private static readonly System.Text.RegularExpressions.Regex JiraKey =
+        new(@"/browse/([A-Z][A-Z0-9_]*)-\d+", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>The project key of a Jira item, such as "CCR" for CCR-1037, from its ticket link. Null for anything else.</summary>
+    public static string? JiraProjectOf(string source, string? sourceUrl) =>
+        source.Equals("jira", StringComparison.OrdinalIgnoreCase) && sourceUrl is not null && JiraKey.Match(sourceUrl) is { Success: true } m
+            ? m.Groups[1].Value
+            : null;
+
     private static readonly Dictionary<string, SourceGroup> Known = new(StringComparer.OrdinalIgnoreCase)
     {
         ["outlook"] = new("outlook", "Email", 0),

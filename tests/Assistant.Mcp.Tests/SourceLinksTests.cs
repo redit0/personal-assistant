@@ -46,4 +46,12 @@ public sealed class SourceLinksTests
     [InlineData("https://contoso.visualstudio.com/DefaultCollection/Platform/_git/api")]
     public void Parses_azure_devops_remotes(string remote) =>
         Assert.Equal(new AzureDevOpsRepo("contoso", "Platform", "api"), SourceLinks.ParseRemote(remote));
+
+    [Theory]
+    [InlineData("jira", "https://example.atlassian.net/browse/PROJ-1037", "PROJ")]
+    [InlineData("jira", "https://example.atlassian.net/browse/OPS2_X-9", "OPS2_X")]
+    [InlineData("jira", null, null)]
+    [InlineData("outlook", "https://example.atlassian.net/browse/PROJ-1037", null)]
+    public void Finds_the_jira_project_of_an_item(string source, string? url, string? project) =>
+        Assert.Equal(project, Assistant.Web.Services.SourceGroups.JiraProjectOf(source, url));
 }

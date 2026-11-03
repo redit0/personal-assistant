@@ -185,6 +185,9 @@ public sealed class UiSettings
 
     /// <summary>How the Items page sorts, by name, such as "Due" or "Newest". Remembered between runs.</summary>
     public string ItemSort { get; set; } = "Due";
+
+    /// <summary>The Jira project key the Items page is narrowed to, such as "CCR", or null for everything.</summary>
+    public string? ItemJiraProject { get; set; }
 }
 
 public sealed class OutlookSettings

@@ -66,6 +66,19 @@
             }
         </select>
     </label>
+    @if (_projects.Count > 0 || _project is not null)
+    {
+        <label class="sort">
+            Jira project
+            <select value="@(_project ?? "")" @onchange="SetProjectAsync" aria-label="Show only one Jira project">
+                <option value="">All items</option>
+                @foreach (var (key, count) in _projects)
+                {
+                    <option value="@key">@key (@count)</option>
+                }
+            </select>
+        </label>
+    }
     <span class="muted">@_items.Count item@(_items.Count == 1 ? "" : "s")</span>
 </div>
 
@@ -181,6 +194,8 @@ else
     private IReadOnlyList<ItemSummary> _items = [];
     private List<(SourceGroup Group, int Count)> _groups = [];
     private HashSet<string> _hidden = [];
+    private List<(string Key, int Count)> _projects = [];
+    private string? _project;
     private ItemDetail? _expanded;
     private string? _error;
     private string? _query;
@@ -195,6 +210,7 @@ else
     {
         _hidden = [.. SettingsStore.Current.Ui.HiddenItemSources];
         _sort = Enum.TryParse<ItemSort>(SettingsStore.Current.Ui.ItemSort, out var sort) ? sort : ItemSort.Due;
+        _project = SettingsStore.Current.Ui.ItemJiraProject;
         Invoker.DataChanged += OnDataChanged;
         Sync.ItemsChanged += OnSynced;
         await LoadAsync();
@@ -231,7 +247,19 @@ else
             }
 
             _groups = [.. counts.OrderBy(c => c.Key.Order).ThenBy(c => c.Key.Label).Select(c => (c.Key, c.Value))];
-            _items = Sort(all.Where(i => !_hidden.Contains(SourceGroups.Of(i.Source).Key)));
+
+            // Picking a Jira project shows only that project's tickets. The one you picked stays in the list even when
+            // this view has none of its tickets, so you can switch back.
+            var projects = all.Select(i => SourceGroups.JiraProjectOf(i.Source, i.SourceUrl)).OfType<string>()
+                .GroupBy(k => k).ToDictionary(g => g.Key, g => g.Count());
+            if (_project is not null)
+            {
+                projects.TryAdd(_project, 0);
+            }
+
+            _projects = [.. projects.OrderBy(p => p.Key, StringComparer.Ordinal).Select(p => (p.Key, p.Value))];
+            _items = Sort(all.Where(i => !_hidden.Contains(SourceGroups.Of(i.Source).Key)
+                && (_project is null || SourceGroups.JiraProjectOf(i.Source, i.SourceUrl) == _project)));
 
             if (_expanded is not null)
             {
@@ -268,6 +296,13 @@ else
     {
         _sort = Enum.TryParse<ItemSort>(e.Value?.ToString(), out var sort) ? sort : ItemSort.Due;
         SettingsStore.Update(s => s.Ui.ItemSort = _sort.ToString());
+        await LoadAsync();
+    }
+
+    private async Task SetProjectAsync(ChangeEventArgs e)
+    {
+        _project = e.Value?.ToString() is { Length: > 0 } key ? key : null;
+        SettingsStore.Update(s => s.Ui.ItemJiraProject = _project);
         await LoadAsync();
     }
 
