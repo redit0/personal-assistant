@@ -176,6 +176,17 @@ public sealed class ThreadTriageEngine(
                     skipped++;
                     continue;
                 }
+
+                // Out of tries. Moving on is right, but quietly treating the messages as read would lose any request in
+                // them, so put the conversation in front of you instead.
+                judgment = new ThreadJudgment
+                {
+                    Decision = "ask",
+                    Title = $"Check this conversation: {messages[^1].Subject}",
+                    Summary = "Triage couldn't read the model's answer for the latest messages here after several tries, so it can't tell whether you need to act. Take a look yourself.",
+                    Confidence = 0,
+                    Reasoning = "The triage model's answers for this conversation couldn't be read.",
+                };
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -199,10 +210,11 @@ public sealed class ThreadTriageEngine(
 
             if (isChat)
             {
-                // A refusal has no topics to report, so it becomes a new one that puts the conversation in front of you.
+                // A refusal or an unreadable answer has no topics to report, so it becomes a new one that puts the
+                // conversation in front of you.
                 chat ??= judgment is null
                     ? new ChatJudgment()
-                    : new ChatJudgment { Topics = [new ChatTopic { Messages = [messages.Count], Judgment = judgment }] };
+                    : new ChatJudgment { Topics = [ChatTopic.From(judgment, messages.Count)] };
                 ApplyChat(db, source, thread.Thread, chat, topics, messages, readUpTo, decisions, history);
 
                 // The conversation's own decision only records how far triage has read.
@@ -213,9 +225,7 @@ public sealed class ThreadTriageEngine(
             }
             else
             {
-                // Gave up on this thread until a new message arrives. FYI keeps it off your list.
-                judgment ??= new ThreadJudgment { Decision = "fyi", Confidence = 0, Reasoning = "Couldn't be triaged after several tries." };
-                Apply(judgment, decision, messages);
+                Apply(judgment!, decision, messages);
                 WeighSender(decision, history);
             }
 
@@ -355,12 +365,12 @@ public sealed class ThreadTriageEngine(
         foreach (var topic in chat.Topics)
         {
             var cited = topic.Messages.Where(n => n >= 1 && n <= messages.Count).Distinct().Order().Select(n => messages[n - 1]).ToList();
-            var decision = topic.Topic is { } number && number >= 1 && number <= openTopics.Count ? openTopics[number - 1] : null;
+            var decision = topic.OpenTopic is { } number && number >= 1 && number <= openTopics.Count ? openTopics[number - 1] : null;
             if (decision is null)
             {
                 // Only something open that the new messages actually say starts a topic, so an old request
                 // shown as context can't come back.
-                if (!IsOpen(TriageService.ParseDecision(topic.Judgment.Decision)) || !cited.Any(m => m.ReceivedAt > readUpTo))
+                if (!IsOpen(TriageService.ParseDecision(topic.Decision)) || !cited.Any(m => m.ReceivedAt > readUpTo))
                 {
                     continue;
                 }
@@ -374,21 +384,21 @@ public sealed class ThreadTriageEngine(
                 decision = new TriageDecision { Source = source.DecisionScope, Key = ConversationTopic.KeyFor(conversation, id) };
                 db.TriageDecisions.Add(decision);
                 decisions[decision.Key] = decision;
-                Apply(topic.Judgment, decision, cited);
+                Apply(topic, decision, cited);
             }
             else
             {
                 // A reply like "Sure" says nothing about the request, so the item keeps pointing at what was asked.
                 var (title, url, content, trust, requester) = (decision.Title, decision.Url, decision.SourceContent, decision.Trust, decision.Requester);
-                Apply(topic.Judgment, decision, cited.Count > 0 ? cited : messages);
+                Apply(topic, decision, cited.Count > 0 ? cited : messages);
                 if (cited.All(m => m.FromMe))
                 {
                     (decision.Url, decision.SourceContent) = (url, content);
                     decision.Trust = decision.Outcome == TriageOutcome.Commitment ? SenderTrust.Self : trust;
-                    decision.Requester = string.IsNullOrWhiteSpace(topic.Judgment.Requester) ? requester : topic.Judgment.Requester;
+                    decision.Requester = string.IsNullOrWhiteSpace(topic.Requester) ? requester : topic.Requester;
                 }
 
-                decision.Title = string.IsNullOrWhiteSpace(topic.Judgment.Title) ? title : decision.Title;
+                decision.Title = string.IsNullOrWhiteSpace(topic.Title) ? title : decision.Title;
             }
 
             WeighSender(decision, history);

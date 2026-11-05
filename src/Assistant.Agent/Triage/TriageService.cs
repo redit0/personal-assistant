@@ -14,7 +14,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Assistant.Agent.Triage;
 
 /// <summary>What the model returns for one email thread.</summary>
-public sealed record ThreadJudgment
+public record ThreadJudgment
 {
     [Description("ignore: nothing for the user. fyi: worth knowing, no action. ask: someone needs something from the user. " +
         "commitment: the user promised to do something. waiting_on: the user is waiting on someone else. " +
@@ -56,15 +56,87 @@ public sealed record ChatJudgment
     public List<ChatTopic> Topics { get; init; } = [];
 }
 
-public sealed record ChatTopic
+/// <summary>
+/// One topic: which open topic it is, if any, which messages belong to it, and the same judgment as a thread, all at
+/// one level. Models write it that way even when asked to nest the judgment, and anything that isn't a number where a
+/// number belongs is read as missing rather than failing the whole answer.
+/// </summary>
+public sealed record ChatTopic : ThreadJudgment
 {
-    [Description("The number of the open topic this updates, or null if it's a new topic.")]
-    public int? Topic { get; init; }
+    [Description("The number of the open topic this updates, from the numbered list of open topics, or null if it's a new topic.")]
+    [JsonConverter(typeof(LenientIntConverter))]
+    public int? OpenTopic { get; init; }
 
     [Description("The numbers of the messages that belong to this topic.")]
+    [JsonConverter(typeof(LenientIntListConverter))]
     public List<int> Messages { get; init; } = [];
 
-    public required ThreadJudgment Judgment { get; init; }
+    public static ChatTopic From(ThreadJudgment j, int message) => new()
+    {
+        Decision = j.Decision,
+        Title = j.Title,
+        Summary = j.Summary,
+        Due = j.Due,
+        DueConfidence = j.DueConfidence,
+        Priority = j.Priority,
+        Requester = j.Requester,
+        Confidence = j.Confidence,
+        Reasoning = j.Reasoning,
+        Messages = [message],
+    };
+}
+
+/// <summary>Reads a number, or a number written as text. Anything else, such as a topic's name, reads as null.</summary>
+public sealed class LenientIntConverter : JsonConverter<int?>
+{
+    public override bool HandleNull => true;
+
+    public override int? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) => ReadOne(ref reader);
+
+    public override void Write(Utf8JsonWriter writer, int? value, JsonSerializerOptions options)
+    {
+        if (value is { } v) writer.WriteNumberValue(v); else writer.WriteNullValue();
+    }
+
+    internal static int? ReadOne(ref Utf8JsonReader reader)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.Number:
+                return reader.TryGetInt32(out var n) ? n : null;
+            case JsonTokenType.String:
+                return int.TryParse(reader.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) ? s : null;
+            case JsonTokenType.StartObject or JsonTokenType.StartArray:
+                reader.Skip();
+                return null;
+            default:
+                return null;
+        }
+    }
+}
+
+/// <summary>Reads a list of numbers, keeping the ones it can read. A single number counts as a list of one.</summary>
+public sealed class LenientIntListConverter : JsonConverter<List<int>>
+{
+    public override List<int> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var list = new List<int>();
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            if (LenientIntConverter.ReadOne(ref reader) is { } one) list.Add(one);
+            return list;
+        }
+
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (LenientIntConverter.ReadOne(ref reader) is { } n) list.Add(n);
+        }
+
+        return list;
+    }
+
+    public override void Write(Utf8JsonWriter writer, List<int> value, JsonSerializerOptions options) =>
+        JsonSerializer.Serialize(writer, value, options);
 }
 
 /// <summary>What the model returns for each calendar event.</summary>

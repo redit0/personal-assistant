@@ -141,11 +141,12 @@ public sealed class OutlookTriageTests : IAsyncLifetime, IDisposable
         await connector.FetchAsync(default);
         var third = await connector.FetchAsync(default);
 
-        // Third strike: recorded as FYI so it stops being retried until a new message arrives.
+        // Third strike: it stops being retried until a new message arrives, and goes to Needs a look so a request
+        // in it isn't lost.
         Assert.Equal(3, _ai.Prompts.Count);
-        Assert.Empty(third.Items);
-        var decision = await _host.WithDbAsync(db => db.TriageDecisions.SingleAsync());
-        Assert.Equal(TriageOutcome.Fyi, decision.Outcome);
+        var item = Assert.Single(third.Items);
+        Assert.True(item.NeedsReview);
+        Assert.Equal("Check this conversation: Q4 numbers", item.Title);
 
         await connector.FetchAsync(default);
         Assert.Equal(3, _ai.Prompts.Count);

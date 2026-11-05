@@ -467,6 +467,33 @@ public sealed class ConversationConnectorTests : IAsyncLifetime, IDisposable
         Assert.Contains("questions for Friday", questions.SourceContent);
     }
 
+    [Theory]
+    [InlineData("""{"topics":[{"key":"update-welcome-text","decision":"commitment","title":"Update the welcome text","summary":"Asked to change it.","confidence":0.9,"messages":[1]}]}""")]
+    [InlineData("""{"topics":[{"topic":"Welcome text for the dashboard","decision":"commitment","title":"Update the welcome text","confidence":0.9,"messages":["1"]}]}""")]
+    [InlineData("```json\n" + """{"topics":[{"openTopic":"null","decision":"commitment","title":"Update the welcome text","confidence":0.9,"messages":1}]}""" + "\n```")]
+    public async Task Reads_topics_the_way_models_actually_write_them(string answer)
+    {
+        _ai.Respond = _ => answer;
+
+        var snapshot = await SyncDmAsync(SlackDm(), ("U2", "Can you update the following to 'Welcome to the dashboard'?", -30));
+
+        Assert.Equal("Update the welcome text", Assert.Single(snapshot.Items).Title);
+    }
+
+    [Fact]
+    public async Task A_chat_triage_cant_read_goes_to_needs_a_look_instead_of_being_dropped()
+    {
+        _ai.Respond = _ => """{"topics":[{"decision":"commitment","title":"Update the text","judgment":"""; // Cut off.
+        var connector = SlackDm();
+        await SyncDmAsync(connector, ("U2", "Can you update the welcome text?", -30));
+        await connector.FetchAsync(default);
+        var snapshot = await connector.FetchAsync(default);
+
+        var item = Assert.Single(snapshot.Items);
+        Assert.StartsWith("Check this conversation", item.Title);
+        Assert.True(item.NeedsReview);
+    }
+
     [Fact]
     public async Task One_message_with_two_requests_becomes_two_items()
     {
@@ -485,7 +512,7 @@ public sealed class ConversationConnectorTests : IAsyncLifetime, IDisposable
         _ai.Respond = _ => Topics(NewTopic("Write the questions", 1));
         var first = await SyncDmAsync(connector, ("U2", "Can you write questions for Friday?", -60));
 
-        _ai.Respond = _ => """{"topics":[{"topic":1,"messages":[2],"judgment":{"decision":"commitment","title":"Write the questions","confidence":0.9}}]}""";
+        _ai.Respond = _ => """{"topics":[{"openTopic":1,"messages":[2],"decision":"commitment","title":"Write the questions","confidence":0.9}]}""";
         var second = await SyncDmAsync(connector, ("U1", "Sure", -30));
 
         Assert.Contains("[1] ask: \"Write the questions\"", _ai.Prompts[^1]);
@@ -604,7 +631,7 @@ public sealed class ConversationConnectorTests : IAsyncLifetime, IDisposable
     private static string Topics(params string[] topics) => $$"""{"topics":[{{string.Join(",", topics)}}]}""";
 
     private static string NewTopic(string title, int message) =>
-        $$$"""{"topic":null,"messages":[{{{message}}}],"judgment":{"decision":"ask","title":"{{{title}}}","summary":"Needs doing.","priority":"normal","confidence":0.9,"reasoning":"Direct request."}}""";
+        $$$"""{"openTopic":null,"messages":[{{{message}}}],"decision":"ask","title":"{{{title}}}","summary":"Needs doing.","priority":"normal","confidence":0.9,"reasoning":"Direct request."}""";
 
     /// <summary>The number of the last message in a chat prompt.</summary>
     private static int LastMessage(string prompt) =>
