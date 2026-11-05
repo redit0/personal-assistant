@@ -481,6 +481,30 @@ public sealed class ConversationConnectorTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
+    public async Task A_new_topic_that_names_no_messages_comes_from_the_new_ones()
+    {
+        _ai.Respond = _ => """{"topics":[{"decision":"commitment","title":"Update the welcome text","confidence":0.9}]}""";
+
+        var snapshot = await SyncDmAsync(SlackDm(), ("U2", "Can you update the welcome text?", -30));
+
+        var item = Assert.Single(snapshot.Items);
+        Assert.Contains("update the welcome text", item.SourceContent);
+    }
+
+    [Fact]
+    public async Task The_chat_prompt_spells_out_the_answer_format()
+    {
+        _ai.Respond = _ => Topics(NewTopic("Update the welcome text", 1));
+
+        await SyncDmAsync(SlackDm(), ("U2", "Can you update the welcome text?", -30));
+
+        // Claude's chat client doesn't enforce a schema, so the field names have to be in front of the model.
+        var prompt = string.Join("\n", _ai.Prompts);
+        Assert.Contains("openTopic", prompt);
+        Assert.Contains("messages", prompt);
+    }
+
+    [Fact]
     public async Task A_chat_triage_cant_read_goes_to_needs_a_look_instead_of_being_dropped()
     {
         _ai.Respond = _ => """{"topics":[{"decision":"commitment","title":"Update the text","judgment":"""; // Cut off.

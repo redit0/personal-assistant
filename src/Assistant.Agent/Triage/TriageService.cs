@@ -384,9 +384,10 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
             Reasoning = new ReasoningOptions { Effort = ReasoningEffort.Low },
         };
 
-        // Anthropic and OpenAI constrain decoding to the schema (structured outputs), so the answer is always
-        // valid JSON. Other providers get the schema in the prompt and a lenient parse below.
-        var structured = settings.Current.AI.Provider is AiProvider.Anthropic or AiProvider.OpenAI or AiProvider.AzureOpenAI;
+        // OpenAI constrains decoding to the schema (structured outputs). The Anthropic SDK's chat client doesn't pass
+        // the schema on, and asking for it that way also keeps the schema out of the prompt, so Claude was guessing
+        // the field names. Anthropic and the rest get the schema in the prompt and a lenient parse below.
+        var structured = settings.Current.AI.Provider is AiProvider.OpenAI or AiProvider.AzureOpenAI;
         var response = await client.GetResponseAsync<T>(messages, JsonOptions, options, useJsonSchemaResponseFormat: structured, cancellationToken);
         if (response.FinishReason == ChatFinishReason.Length)
         {

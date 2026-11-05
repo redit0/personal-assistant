@@ -368,10 +368,22 @@ public sealed class ThreadTriageEngine(
             var decision = topic.OpenTopic is { } number && number >= 1 && number <= openTopics.Count ? openTopics[number - 1] : null;
             if (decision is null)
             {
-                // Only something open that the new messages actually say starts a topic, so an old request
-                // shown as context can't come back.
-                if (!IsOpen(TriageService.ParseDecision(topic.Decision)) || !cited.Any(m => m.ReceivedAt > readUpTo))
+                if (!IsOpen(TriageService.ParseDecision(topic.Decision)))
                 {
+                    continue;
+                }
+
+                // A topic that names no messages came from the new ones, since only those can start a topic.
+                if (topic.Messages.Count == 0)
+                {
+                    cited = [.. messages.Where(m => m.ReceivedAt > readUpTo)];
+                }
+
+                // Only something the new messages actually say starts a topic, so an old request shown as context
+                // can't come back.
+                if (!cited.Any(m => m.ReceivedAt > readUpTo))
+                {
+                    logger.LogInformation("Triage set aside a new {Scope} topic in {Conversation} that cites only earlier messages", source.DecisionScope, conversation);
                     continue;
                 }
 
