@@ -29,6 +29,8 @@ public interface IConnector
 /// </param>
 /// <param name="ExternalId">Unique within the connector, such as "owner/repo#12" or "PROJ-123".</param>
 /// <param name="RequestStartedAt">Conversations only: when the current request began. Null for sources whose items are one thing for life, such as a ticket.</param>
+/// <param name="ReopenedAt">Conversations only: when triage last saw that work you had marked done needs doing again.</param>
+/// <param name="LatestMessageAt">Conversations only: when the newest message behind this item was sent.</param>
 public sealed record SourceItem(
     string Scope,
     string ExternalId,
@@ -46,7 +48,9 @@ public sealed record SourceItem(
     double? DueConfidence = null,
     string? Reasoning = null,
     bool NeedsReview = false,
-    DateTime? RequestStartedAt = null);
+    DateTime? RequestStartedAt = null,
+    DateTime? ReopenedAt = null,
+    DateTime? LatestMessageAt = null);
 
 public sealed record ConnectorSnapshot(
     IReadOnlyList<SourceItem> Items,

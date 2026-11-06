@@ -191,6 +191,107 @@ public sealed class SyncReconcilerTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_notification_about_work_just_finished_folds_into_it_and_stays_closed()
+    {
+        // The pull request merged moments before the email about it was triaged.
+        var prId = await AddFinishedItemAsync(closedBySync: true, DateTime.UtcNow.AddMinutes(-1));
+        var detector = new FakeDetector(_ => new DuplicateMatch(prId, null, "The same pull request, already merged."));
+
+        var result = await ApplyAsync(ConnectorSnapshot.Complete([Src("mail", title: "Re-review the updated PR")]), detector);
+
+        Assert.Equal((0, 1, 0), (result.Added, result.Merged, result.Reopened));
+        Assert.Contains(detector.Seen, s => s.OpenIds.Contains(prId));
+        Assert.Equal(ItemStatus.Merged, (await GetAsync("test:mail")).Status);
+        var pr = await _host.WithDbAsync(db => db.Items.Include(i => i.Notes).SingleAsync(i => i.Id == prId));
+        Assert.Equal(ItemStatus.Done, pr.Status);
+        Assert.Contains(pr.Notes, n => n.Text.Contains("already done, so it stays closed"));
+
+        // Later syncs leave both alone.
+        var again = await ApplyAsync(ConnectorSnapshot.Complete([Src("mail", title: "Re-review the updated PR")]), detector);
+        Assert.Equal(0, again.Added + again.Merged + again.Reopened);
+        Assert.Equal(ItemStatus.Done, await _host.WithDbAsync(db => db.Items.Where(i => i.Id == prId).Select(i => i.Status).SingleAsync()));
+    }
+
+    [Fact]
+    public async Task A_follow_up_showing_work_you_finished_isnt_done_reopens_it()
+    {
+        var doneId = await AddFinishedItemAsync(closedBySync: false, DateTime.UtcNow.AddHours(-3));
+        var detector = new FakeDetector(_ => new DuplicateMatch(doneId, null, "Dana says the numbers are missing October.", Reopen: true));
+
+        var result = await ApplyAsync(ConnectorSnapshot.Complete([Src("slack", title: "Q4 numbers are missing October")]), detector);
+
+        Assert.Equal((1, 1), (result.Merged, result.Reopened));
+        var kept = await _host.WithDbAsync(db => db.Items.Include(i => i.Notes).SingleAsync(i => i.Id == doneId));
+        Assert.Equal(ItemStatus.Open, kept.Status);
+        Assert.Null(kept.CompletedAt);
+        Assert.Contains(kept.Notes, n => n.Text.StartsWith("Reopened:") && n.Text.Contains("missing October"));
+    }
+
+    [Fact]
+    public async Task More_work_on_something_its_source_finished_becomes_its_own_item()
+    {
+        var prId = await AddFinishedItemAsync(closedBySync: true, DateTime.UtcNow.AddHours(-3));
+        var detector = new FakeDetector(_ => new DuplicateMatch(prId, null, "The merged fix didn't work.", Reopen: true));
+
+        var result = await ApplyAsync(ConnectorSnapshot.Complete([Src("mail", title: "The fix didn't work")]), detector);
+
+        Assert.Equal((1, 0), (result.Added, result.Merged));
+        var item = await GetAsync("test:mail");
+        Assert.Equal(ItemStatus.Open, item.Status);
+        Assert.Contains(item.Notes, n => n.Text.Contains($"Follows up on item {prId}"));
+        Assert.Equal(ItemStatus.Done, await _host.WithDbAsync(db => db.Items.Where(i => i.Id == prId).Select(i => i.Status).SingleAsync()));
+    }
+
+    [Fact]
+    public async Task Work_finished_long_ago_isnt_compared_against()
+    {
+        var oldId = await AddFinishedItemAsync(closedBySync: false, DateTime.UtcNow.AddDays(-30));
+        var detector = new FakeDetector(_ => null);
+
+        await ApplyAsync(ConnectorSnapshot.Complete([Src("slack")]), detector);
+
+        Assert.DoesNotContain(detector.Seen, s => s.OpenIds.Contains(oldId));
+    }
+
+    [Fact]
+    public async Task Triage_reopening_a_conversation_you_closed_reopens_the_same_item()
+    {
+        await ApplyAsync(ConnectorSnapshot.Complete([Src("a", title: "Fix the chart") with { RequestStartedAt = DateTime.MinValue }]));
+        var closedAt = DateTime.UtcNow.AddHours(-1);
+        await CloseItYourselfAsync(closedAt);
+
+        var reopenedAt = DateTime.UtcNow;
+        var conversation = Src("a", title: "Fix the chart axis", updated: T0.AddDays(1)) with
+        {
+            RequestStartedAt = DateTime.MinValue, ReopenedAt = reopenedAt, Reasoning = "Dana says it's still wrong.",
+        };
+        var result = await ApplyAsync(ConnectorSnapshot.Complete([conversation]));
+
+        Assert.Equal((0, 1), (result.Added, result.Reopened));
+        var item = await GetAsync("test:a");
+        Assert.Equal((ItemStatus.Open, "Fix the chart axis"), (item.Status, item.Title));
+        Assert.Contains(item.Notes, n => n.Text.Contains("show it isn't finished") && n.Text.Contains("still wrong"));
+
+        // Close it again: the same reopen doesn't bring it back a second time.
+        await CloseItYourselfAsync(DateTime.UtcNow.AddMinutes(1));
+        var again = await ApplyAsync(ConnectorSnapshot.Complete([conversation with { UpdatedAt = T0.AddDays(2) }]));
+        Assert.Equal(0, again.Reopened);
+        Assert.Equal(ItemStatus.Done, (await GetAsync("test:a")).Status);
+    }
+
+    private Task<int> AddFinishedItemAsync(bool closedBySync, DateTime completedAt) => _host.WithDbAsync(async db =>
+    {
+        var item = new Item
+        {
+            Title = "Send Dana the Q4 numbers", Source = "azuredevops", ExternalId = "org:pr:1", Status = ItemStatus.Done,
+            ClosedBySync = closedBySync, CompletedAt = completedAt, CreatedAt = T0, UpdatedAt = T0,
+        };
+        db.Items.Add(item);
+        await db.SaveChangesAsync();
+        return item.Id;
+    });
+
+    [Fact]
     public async Task Merged_items_are_hidden_and_can_be_split_back_out()
     {
         var emailId = await AddEmailItemAsync();

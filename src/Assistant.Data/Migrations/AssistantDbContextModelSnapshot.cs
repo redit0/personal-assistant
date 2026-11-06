@@ -408,6 +408,9 @@ namespace Assistant.Data.Migrations
                     b.Property<string>("Reasoning")
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("ReopenedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime?>("RequestStartedAt")
                         .HasColumnType("TEXT");
 

@@ -592,6 +592,51 @@ public sealed class ConversationConnectorTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
+    public async Task A_topic_you_marked_done_reopens_when_new_messages_show_it_isnt_finished()
+    {
+        var connector = SlackDm();
+        _ai.Respond = _ => Topics(NewTopic("Fix the chart", 1));
+        var first = await SyncDmAsync(connector, ("U2", "The chart axis is wrong", -60));
+        await MarkDoneAsync(first.Items[0].ExternalId);
+
+        _ai.Respond = _ => Topics("""{"openTopic":1,"messages":[2],"decision":"ask","title":"Fix the chart","summary":"The axis is still wrong.","confidence":0.9,"reopen":true,"reasoning":"Dana says it's still broken."}""");
+        var second = await SyncDmAsync(connector, ("U2", "The axis is still wrong after your change", -30));
+
+        var prompt = _ai.Prompts[^1].ReplaceLineEndings("\n");
+        Assert.Contains("Topics the user already marked done", prompt);
+        Assert.Contains("[1] done ", prompt);
+        var item = Assert.Single(second.Items);
+        Assert.Equal(first.Items[0].ExternalId, item.ExternalId);
+        Assert.NotNull(item.ReopenedAt);
+        Assert.Contains("still wrong", item.SourceContent);
+    }
+
+    [Fact]
+    public async Task Thanks_for_a_topic_you_marked_done_leaves_it_done()
+    {
+        var connector = SlackDm();
+        _ai.Respond = _ => Topics(NewTopic("Fix the chart", 1));
+        var first = await SyncDmAsync(connector, ("U2", "The chart axis is wrong", -60));
+        await MarkDoneAsync(first.Items[0].ExternalId);
+
+        // Pointing at the done topic without reopen changes nothing.
+        _ai.Respond = _ => Topics("""{"openTopic":1,"messages":[2],"decision":"ask","title":"Fix the chart","confidence":0.9,"reopen":false}""");
+        var second = await SyncDmAsync(connector, ("U2", "Looks great, thanks!", -30));
+
+        Assert.Empty(second.Items);
+    }
+
+    private Task<int> MarkDoneAsync(string externalId) => _host.WithDbAsync(async db =>
+    {
+        db.Items.Add(new Item
+        {
+            Title = "Fix the chart", Source = "slack", ExternalId = externalId, Status = ItemStatus.Done,
+            CompletedAt = DateTime.UtcNow.AddMinutes(-45), CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
+        return await db.SaveChangesAsync();
+    });
+
+    [Fact]
     public async Task An_open_whole_dm_judgment_moves_to_a_topic_with_its_item()
     {
         var at = DateTime.UtcNow.AddHours(-2);

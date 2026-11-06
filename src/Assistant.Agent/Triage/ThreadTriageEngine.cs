@@ -58,6 +58,10 @@ public sealed class ThreadTriageEngine(
 {
     private const int MessagesPerThread = 8;
     private const int MessagesPerChat = 30;
+
+    /// <summary>How long a chat topic you marked done can still be reopened by new messages, and how many are shown.</summary>
+    private static readonly TimeSpan RecentlyDone = TimeSpan.FromDays(14);
+    private const int MaxDoneTopics = 10;
     private const int MessagesElsewhere = 6;
     private const int MaxAttemptsPerThread = 3;
     private static readonly TimeSpan SignalRetention = TimeSpan.FromDays(60);
@@ -128,6 +132,8 @@ public sealed class ThreadTriageEngine(
             }
 
             var topics = isChat ? await OpenTopicsAsync(db, source, thread.Thread, decisions, cancellationToken) : [];
+            var doneTopics = isChat ? await DoneTopicsAsync(db, source, thread.Thread, decisions, cancellationToken) : [];
+            var doneAt = isChat || previous is null ? null : await DoneByYouAtAsync(db, source, thread.Thread, cancellationToken);
             var readUpTo = previous?.LastSeenAt ?? DateTime.MinValue;
 
             ThreadJudgment? judgment = null;
@@ -138,13 +144,13 @@ public sealed class ThreadTriageEngine(
                 {
                     chat = await triage.JudgeChatAsync(
                         [.. messages.Select(ToThreadMessage)], messages.Count(m => m.ReceivedAt > readUpTo),
-                        topics, me, calendar, source.Medium, cancellationToken, [.. outside.Select(ToThreadMessage)]);
+                        topics, me, calendar, source.Medium, cancellationToken, [.. outside.Select(ToThreadMessage)], doneTopics);
                 }
                 else
                 {
                     judgment = await triage.JudgeThreadAsync(
                         [.. messages.Select(ToThreadMessage)],
-                        previous, me, calendar, source.Medium, cancellationToken, [.. outside.Select(ToThreadMessage)]);
+                        previous, me, calendar, source.Medium, cancellationToken, [.. outside.Select(ToThreadMessage)], doneAt);
                 }
             }
             catch (TriageRefusedException)
@@ -215,7 +221,7 @@ public sealed class ThreadTriageEngine(
                 chat ??= judgment is null
                     ? new ChatJudgment()
                     : new ChatJudgment { Topics = [ChatTopic.From(judgment, messages.Count)] };
-                ApplyChat(db, source, thread.Thread, chat, topics, messages, readUpTo, decisions, history);
+                ApplyChat(db, source, thread.Thread, chat, topics, doneTopics, messages, readUpTo, decisions, history);
 
                 // The conversation's own decision only records how far triage has read.
                 decision.Outcome = TriageOutcome.Ignore;
@@ -225,7 +231,7 @@ public sealed class ThreadTriageEngine(
             }
             else
             {
-                Apply(judgment!, decision, messages);
+                Apply(judgment!, decision, messages, reopening: doneAt is not null && judgment!.Reopen);
                 WeighSender(decision, history);
             }
 
@@ -264,7 +270,9 @@ public sealed class ThreadTriageEngine(
             DueConfidence: d.DueConfidence,
             Reasoning: d.Reasoning,
             NeedsReview: d.Confidence < threshold,
-            RequestStartedAt: d.RequestStartedAt ?? DateTime.MinValue))];
+            RequestStartedAt: d.RequestStartedAt ?? DateTime.MinValue,
+            ReopenedAt: d.ReopenedAt,
+            LatestMessageAt: d.LastSeenAt))];
     }
 
     /// <summary>A DM, group chat, or channel timeline, as opposed to one thread within it. Email has only threads.</summary>
@@ -358,14 +366,94 @@ public sealed class ThreadTriageEngine(
         return topics;
     }
 
+    /// <summary>
+    /// Topics in a chat whose items you marked done lately, newest first. New messages can show one isn't finished,
+    /// and then the same item reopens.
+    /// </summary>
+    private async Task<List<DoneTopic>> DoneTopicsAsync(
+        AssistantDbContext db, ConversationSource source, string conversation, Dictionary<string, TriageDecision> decisions, CancellationToken cancellationToken)
+    {
+        var topics = decisions.Values
+            .Where(d => d.Key != conversation && ConversationTopic.ConversationOf(d.Key) == conversation)
+            .ToDictionary(d => $"{source.DecisionScope}:{d.Key}");
+        if (topics.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = topics.Keys.ToList();
+        var since = time.GetUtcNow().UtcDateTime - RecentlyDone;
+        var done = await db.Items.AsNoTracking()
+            .Where(i => i.Source == source.SignalSource && ids.Contains(i.ExternalId!) && !i.ClosedBySync
+                && i.Status == ItemStatus.Done && i.CompletedAt > since)
+            .OrderByDescending(i => i.CompletedAt)
+            .Take(MaxDoneTopics)
+            .Select(i => new { i.ExternalId, i.CompletedAt })
+            .ToListAsync(cancellationToken);
+
+        return [.. done.Select(i => new DoneTopic(topics[i.ExternalId!], i.CompletedAt!.Value))];
+    }
+
+    /// <summary>When you marked this thread's item done, or null if it isn't done or the assistant closed it.</summary>
+    private static async Task<DateTime?> DoneByYouAtAsync(AssistantDbContext db, ConversationSource source, string thread, CancellationToken cancellationToken)
+    {
+        var externalId = $"{source.DecisionScope}:{thread}";
+        var item = await db.Items.AsNoTracking()
+            .Where(i => i.Source == source.SignalSource && i.ExternalId == externalId)
+            .OrderByDescending(i => i.UpdatedAt)
+            .Select(i => new { i.Status, i.ClosedBySync, i.CompletedAt, i.MergedIntoId })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        // A merged copy is done when the item it was merged into is, however that item was closed. A thread only
+        // speaks for its own work, so a merged copy is the one case where something else closed what it asked for.
+        if (item is { Status: ItemStatus.Merged, MergedIntoId: { } into })
+        {
+            var primary = await db.Items.AsNoTracking()
+                .Where(i => i.Id == into)
+                .Select(i => new { i.Status, i.CompletedAt })
+                .FirstOrDefaultAsync(cancellationToken);
+            return primary is { Status: ItemStatus.Done } ? primary.CompletedAt : null;
+        }
+
+        return item is { Status: ItemStatus.Done, ClosedBySync: false } ? item.CompletedAt : null;
+    }
+
     private void ApplyChat(
         AssistantDbContext db, ConversationSource source, string conversation, ChatJudgment chat, List<TriageDecision> openTopics,
-        List<Signal> messages, DateTime readUpTo, Dictionary<string, TriageDecision> decisions, SenderHistory history)
+        List<DoneTopic> doneTopics, List<Signal> messages, DateTime readUpTo, Dictionary<string, TriageDecision> decisions, SenderHistory history)
     {
         foreach (var topic in chat.Topics)
         {
             var cited = topic.Messages.Where(n => n >= 1 && n <= messages.Count).Distinct().Order().Select(n => messages[n - 1]).ToList();
-            var decision = topic.OpenTopic is { } number && number >= 1 && number <= openTopics.Count ? openTopics[number - 1] : null;
+            var number = topic.OpenTopic ?? 0;
+            if (number > openTopics.Count && number <= openTopics.Count + doneTopics.Count)
+            {
+                // A topic you marked done. Only new messages showing the same work needs doing again bring it back.
+                var done = doneTopics[number - openTopics.Count - 1].Topic;
+                if (topic.Messages.Count == 0)
+                {
+                    cited = [.. messages.Where(m => m.ReceivedAt > readUpTo)];
+                }
+
+                var news = cited.Where(m => m.ReceivedAt > readUpTo).ToList();
+                if (topic.Reopen && IsOpen(TriageService.ParseDecision(topic.Decision)) && news.Count > 0)
+                {
+                    var (title, content) = (done.Title, done.SourceContent);
+                    Apply(topic, done, cited, reopening: true);
+                    done.Title = string.IsNullOrWhiteSpace(topic.Title) ? title : done.Title;
+                    if (news.All(m => m.FromMe))
+                    {
+                        done.SourceContent = content;
+                    }
+
+                    logger.LogInformation("Triage reopened {Scope} topic {Topic}: {Reason}", source.DecisionScope, done.Key, topic.Reasoning);
+                    WeighSender(done, history);
+                }
+
+                continue;
+            }
+
+            var decision = number >= 1 && number <= openTopics.Count ? openTopics[number - 1] : null;
             if (decision is null)
             {
                 if (!IsOpen(TriageService.ParseDecision(topic.Decision)))
@@ -503,14 +591,20 @@ public sealed class ThreadTriageEngine(
         await db.Signals.Where(s => s.Source == signalSource && s.ReceivedAt < cutoff).ExecuteDeleteAsync(cancellationToken);
     }
 
-    private void Apply(ThreadJudgment judgment, TriageDecision decision, List<Signal> messages)
+    /// <param name="reopening">The user marked this item done, and the model says the new messages show it isn't.</param>
+    private void Apply(ThreadJudgment judgment, TriageDecision decision, List<Signal> messages, bool reopening = false)
     {
         var latest = messages[^1];
         var latestInbound = messages.LastOrDefault(m => !m.FromMe);
         var wasResolved = decision.Outcome == TriageOutcome.Resolved;
 
         decision.Outcome = TriageService.ParseDecision(judgment.Decision);
-        if (IsOpen(decision.Outcome) && (wasResolved || judgment.NewRequest))
+        if (IsOpen(decision.Outcome) && reopening && !judgment.NewRequest)
+        {
+            // The same work again, so the same item reopens rather than a new one starting.
+            decision.ReopenedAt = time.GetUtcNow().UtcDateTime;
+        }
+        else if (IsOpen(decision.Outcome) && (wasResolved || judgment.NewRequest))
         {
             decision.RequestStartedAt = time.GetUtcNow().UtcDateTime;
         }

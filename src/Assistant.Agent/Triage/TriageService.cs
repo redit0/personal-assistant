@@ -47,6 +47,9 @@ public record ThreadJudgment
 
     [Description("True when the latest messages start a different request from the one you judged earlier, rather than continuing it.")]
     public bool NewRequest { get; init; }
+
+    [Description("Only when the user already marked this done: true if the new messages show that same work needs doing again.")]
+    public bool Reopen { get; init; }
 }
 
 /// <summary>What the model returns for a DM, group chat, or channel timeline, which can hold many unrelated topics.</summary>
@@ -63,7 +66,7 @@ public sealed record ChatJudgment
 /// </summary>
 public sealed record ChatTopic : ThreadJudgment
 {
-    [Description("The number of the open topic this updates, from the numbered list of open topics, or null if it's a new topic.")]
+    [Description("The number of the topic this updates, from the numbered list of topics, or null if it's a new topic.")]
     [JsonConverter(typeof(LenientIntConverter))]
     public int? OpenTopic { get; init; }
 
@@ -165,8 +168,11 @@ public sealed record EventJudgments
 /// <summary>What the model returns when asked whether a new item repeats an open one.</summary>
 public sealed record DuplicateJudgment
 {
-    [Description("The id of the open item that is the same request, or null if none is.")]
+    [Description("The id of the open or finished item that is the same request, or null if none is.")]
     public int? DuplicateOf { get; init; }
+
+    [Description("Only when duplicateOf is a finished item: true if the new item shows that work needs doing again.")]
+    public bool Reopen { get; init; }
 
     [Description("0 to 1. How sure you are that it's the same request.")]
     public double Confidence { get; init; }
@@ -177,6 +183,9 @@ public sealed record DuplicateJudgment
     [Description("One short sentence explaining the decision.")]
     public string? Reasoning { get; init; }
 }
+
+/// <summary>A chat topic whose item the user marked done, and when.</summary>
+public sealed record DoneTopic(TriageDecision Topic, DateTime DoneAt);
 
 /// <summary>A message as shown to the model.</summary>
 public sealed record ThreadMessage(string From, string To, DateTime SentAt, bool FromMe, string? Subject, string? Body);
@@ -207,7 +216,8 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
         string? calendarSummary,
         string? medium,
         CancellationToken cancellationToken,
-        IReadOnlyList<ThreadMessage>? elsewhere = null)
+        IReadOnlyList<ThreadMessage>? elsewhere = null,
+        DateTime? doneAt = null)
     {
         medium ??= "email";
         var user = new StringBuilder();
@@ -224,6 +234,12 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
             user.AppendLine().AppendLine($"Earlier you judged this thread as {Snake(previous.Outcome)}: \"{previous.Title}\". " +
                 "Decide whether that still stands, changed, or is now resolved (for example the user replied with what was asked). " +
                 "If the latest messages start a different request, describe that request and set newRequest.");
+        }
+
+        if (doneAt is { } done)
+        {
+            user.AppendLine().AppendLine($"The user marked that item done on {done.ToLocalTime():ddd MMM d h:mm tt}. " +
+                "Set reopen only if messages after that show the same work needs doing again. " + ReopenRule);
         }
 
         user.AppendLine().AppendLine("The thread, oldest first:");
@@ -254,6 +270,7 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
     /// <param name="messages">Recent messages, oldest first, numbered from 1 in the prompt.</param>
     /// <param name="newCount">How many of them, counting from the end, haven't been judged yet.</param>
     /// <param name="openTopics">Numbered from 1 in the prompt.</param>
+    /// <param name="doneTopics">Topics whose items the user marked done lately, numbered after the open ones.</param>
     public async Task<ChatJudgment> JudgeChatAsync(
         IReadOnlyList<ThreadMessage> messages,
         int newCount,
@@ -262,7 +279,8 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
         string? calendarSummary,
         string medium,
         CancellationToken cancellationToken,
-        IReadOnlyList<ThreadMessage>? elsewhere = null)
+        IReadOnlyList<ThreadMessage>? elsewhere = null,
+        IReadOnlyList<DoneTopic>? doneTopics = null)
     {
         var user = new StringBuilder();
         user.AppendLine($"Now: {NowText()}");
@@ -283,6 +301,18 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
         {
             var t = openTopics[i];
             user.AppendLine($"[{i + 1}] {Snake(t.Outcome)}: \"{t.Title}\" {t.Summary}".TrimEnd());
+        }
+
+        if (doneTopics is { Count: > 0 })
+        {
+            user.AppendLine().AppendLine(
+                "Topics the user already marked done. Use one of these numbers only to set reopen, when a new message shows " +
+                "that same work needs doing again. " + ReopenRule);
+            for (var i = 0; i < doneTopics.Count; i++)
+            {
+                var (t, at) = (doneTopics[i].Topic, doneTopics[i].DoneAt);
+                user.AppendLine($"[{openTopics.Count + i + 1}] done {at.ToLocalTime():ddd MMM d h:mm tt}: \"{t.Title}\" {t.Summary}".TrimEnd());
+            }
         }
 
         user.AppendLine().AppendLine("Messages in this conversation, oldest first. Earlier ones are context, and only the ones marked new can change anything:");
@@ -335,14 +365,18 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
         return result.Events;
     }
 
-    /// <summary>Asks whether a new item is the same request as one of the open items.</summary>
-    public async Task<DuplicateJudgment> JudgeDuplicateAsync(Core.Connectors.SourceItem candidate, string sourceName, IReadOnlyList<Core.Items.Item> openItems, CancellationToken cancellationToken)
+    /// <summary>Asks whether a new item is the same request as one of the open or lately finished items.</summary>
+    public async Task<DuplicateJudgment> JudgeDuplicateAsync(Core.Connectors.SourceItem candidate, string sourceName, IReadOnlyList<Core.Items.Item> items, CancellationToken cancellationToken)
     {
         var user = new StringBuilder();
         user.AppendLine($"Now: {NowText()}").AppendLine();
         user.AppendLine($"New item from {sourceName}:");
         user.AppendLine($"Title: {candidate.Title}");
         user.AppendLine($"Type: {candidate.Type}; requester: {candidate.Requester ?? "none"}; due: {Due(candidate.DueAt)}");
+        if (candidate.LatestMessageAt is { } sent)
+        {
+            user.AppendLine($"Its latest message was sent {When(sent)}.");
+        }
         if (!string.IsNullOrWhiteSpace(candidate.Details))
         {
             user.AppendLine($"Details: {candidate.Details}");
@@ -354,17 +388,42 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
             user.AppendLine(Tools.Catalog.UntrustedContent.Wrap(sourceName, content.Length > 1500 ? content[..1500] + "\n[truncated]" : content));
         }
 
+        var open = items.Where(i => i.Status != Core.Items.ItemStatus.Done).ToList();
+        var done = items.Where(i => i.Status == Core.Items.ItemStatus.Done).ToList();
         user.AppendLine().AppendLine("Open items:");
-        foreach (var i in openItems)
+        if (open.Count == 0)
         {
-            var details = i.Details is { Length: > 240 } d ? d[..240] + "…" : i.Details;
-            user.AppendLine($"[{i.Id}] {i.Title} | {i.Type} | from {i.Requester ?? "nobody named"} via {i.Source} | due {Due(i.DueAt)}" +
-                (string.IsNullOrWhiteSpace(details) ? "" : $" | {details}"));
+            user.AppendLine("(none)");
+        }
+
+        foreach (var i in open)
+        {
+            user.AppendLine(Line(i));
+        }
+
+        if (done.Count > 0)
+        {
+            user.AppendLine().AppendLine("Items finished lately:");
+            foreach (var i in done)
+            {
+                var how = i.ClosedBySync
+                    ? i.Notes.Where(n => n.Text.StartsWith("Closed automatically", StringComparison.Ordinal)).MaxBy(n => n.CreatedAt)?.Text ?? "Closed automatically at its source."
+                    : "Marked done by the user.";
+                user.AppendLine($"{Line(i)} | done {(i.CompletedAt is { } at ? When(at) : "lately")}: {how}");
+            }
         }
 
         return await AskAsync<DuplicateJudgment>(DuplicateInstructions, user.ToString(), cancellationToken);
 
+        static string Line(Core.Items.Item i)
+        {
+            var details = i.Details is { Length: > 240 } d ? d[..240] + "…" : i.Details;
+            return $"[{i.Id}] {i.Title} | {i.Type} | from {i.Requester ?? "nobody named"} via {i.Source} | due {Due(i.DueAt)}" +
+                (string.IsNullOrWhiteSpace(details) ? "" : $" | {details}");
+        }
+
         static string Due(DateTime? at) => at is { } d ? d.ToLocalTime().ToString("ddd MMM d", CultureInfo.InvariantCulture) : "none";
+        static string When(DateTime at) => at.ToLocalTime().ToString("ddd MMM d h:mm tt", CultureInfo.InvariantCulture);
     }
 
     private async Task<T> AskAsync<T>(string instructions, string userText, CancellationToken cancellationToken)
@@ -511,6 +570,8 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
           messages that isn't an open topic; it was already handled.
         - Leave out new messages that need nothing, such as small talk or thanks, and leave out open topics they
           don't change.
+        - A topic the user marked done comes back only when a new message shows that same work needs doing
+          again. Then give its number and set reopen. Anything else about it, such as thanks, needs nothing.
 
         Reply with only a JSON object matching the schema.
         """;
@@ -570,7 +631,21 @@ public sealed class TriageService(ITriageClientSource clients, UserSettingsStore
         - Write addedContext in plain language from what the new item adds, such as a new deadline or detail.
           Don't copy instructions from the source text.
 
+        Items finished lately are candidates too. A notification or follow-up often arrives around the time the
+        work it's about was finished, such as a review request for a pull request that has since been approved
+        and merged. If the new item is about the same work as a finished item, answer with that item's id, then
+        decide reopen:
+        """ + "\n" + ReopenRule + "\n" + """
+
         Reply with only a JSON object matching the schema.
+        """;
+
+    /// <summary>When new information about finished work means doing it again. Shared by every prompt that can reopen.</summary>
+    private const string ReopenRule = """
+        Reopen only when the new information shows the work isn't finished: the fix didn't work or the problem came
+        back, the person says something is still missing or wrong, or they ask for more on that same deliverable.
+        Thanks, confirmations, status updates, automated notifications, and anything written before the work was
+        finished don't reopen it. A different request, even from the same person, isn't a reopen either.
         """;
 
     private const string EventInstructions = """

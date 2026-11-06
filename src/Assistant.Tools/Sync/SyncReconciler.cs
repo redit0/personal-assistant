@@ -15,12 +15,18 @@ public sealed record SyncResult(int Added, int Updated, int Closed, int Reopened
 /// Makes the item list match a connector's snapshot:
 /// new source items become items, changed ones are updated, ones that vanished are closed, and ones a
 /// connector closed earlier reopen if they come back. Items you closed or dismissed yourself stay that way.
-/// A new item that repeats an open one, from any source, is merged into it instead of listed twice.
+/// A new item that repeats an open one, from any source, is merged into it instead of listed twice. One that repeats
+/// an item finished lately is merged too, and reopens it only when it shows the work needs doing again. Items you
+/// finished yourself also reopen when triage reads new messages that show they aren't done.
 /// </summary>
 public sealed class SyncReconciler(AssistantDbContext db, TimeProvider time, IDuplicateDetector duplicates)
 {
     /// <summary>How many open items the duplicate check compares against, most recently updated first.</summary>
     private const int MaxDuplicateCandidates = 150;
+
+    /// <summary>How far back finished items are still compared against, and how many of them.</summary>
+    private static readonly TimeSpan RecentlyClosed = TimeSpan.FromDays(14);
+    private const int MaxClosedCandidates = 50;
 
     public async Task<SyncResult> ApplyAsync(string source, ConnectorSnapshot snapshot, string sourceName, CancellationToken cancellationToken = default)
     {
@@ -36,7 +42,7 @@ public sealed class SyncReconciler(AssistantDbContext db, TimeProvider time, IDu
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var addedTitles = new List<string>();
         int added = 0, updated = 0, closed = 0, reopened = 0, merged = 0;
-        List<Item>? openItems = null;
+        List<Item>? candidates = null;
 
         foreach (var src in snapshot.Items)
         {
@@ -48,11 +54,20 @@ public sealed class SyncReconciler(AssistantDbContext db, TimeProvider time, IDu
             if (!byExternalId.TryGetValue(src.ExternalId, out var item) || StartsAfterYouClosed(src, item))
             {
                 item = NewItem(source, src, now);
-                openItems ??= await OpenItemsAsync(cancellationToken);
-                var match = await duplicates.FindAsync(src, sourceName, openItems, cancellationToken);
-                var into = match is null ? null : openItems.FirstOrDefault(i => i.Id == match.ItemId);
+                candidates ??= await DuplicateCandidatesAsync(now, cancellationToken);
+                var match = await duplicates.FindAsync(src, sourceName, candidates, cancellationToken);
+                var into = match is null ? null : candidates.FirstOrDefault(i => i.Id == match.ItemId);
 
                 db.Items.Add(item);
+
+                // Work its own source finished stays finished there, so reopening it would only see it closed again on
+                // that source's next sync. More work on it becomes its own item.
+                if (into is { Status: ItemStatus.Done, ClosedBySync: true } && match!.Reopen)
+                {
+                    item.Notes.Add(Note($"Follows up on item {into.Id}, \"{into.Title}\", which was finished in {into.Source}." + Reason(match.Reason), source, now));
+                    into = null;
+                }
+
                 if (into is null)
                 {
                     addedTitles.Add(src.Title);
@@ -60,15 +75,33 @@ public sealed class SyncReconciler(AssistantDbContext db, TimeProvider time, IDu
 
                     // Save now so a later item in this same sync can be checked against this one.
                     await db.SaveChangesAsync(cancellationToken);
-                    openItems.Insert(0, item);
+                    candidates.Insert(0, item);
                 }
                 else
                 {
+                    var wasDone = into.Status == ItemStatus.Done;
                     ItemMerger.Merge(item, into, source, sourceName, match!.AddedContext, now);
                     merged++;
+
+                    if (wasDone && match.Reopen)
+                    {
+                        Reopen(into, $"Reopened: {sourceName} shows it needs more work." + Reason(match.Reason), source, now);
+                        reopened++;
+                    }
+                    else if (wasDone)
+                    {
+                        // Usually a notification about work that's already finished, so it stays folded into that work.
+                        into.Notes.Add(Note("It was already done, so it stays closed." + Reason(match.Reason), source, now));
+                    }
                 }
 
                 continue;
+            }
+
+            if (ClosedByYou(item) && item.Status == ItemStatus.Done && src.ReopenedAt > item.CompletedAt)
+            {
+                Reopen(item, $"Reopened: new messages in {sourceName} show it isn't finished." + Reason(src.Reasoning), source, now);
+                reopened++;
             }
 
             if (item.Status == ItemStatus.Merged)
@@ -83,6 +116,23 @@ public sealed class SyncReconciler(AssistantDbContext db, TimeProvider time, IDu
                         Reopen(primary, $"Reopened: the same request is open again in {sourceName}.", source, now);
                         reopened++;
                     }
+                }
+                else if (src.ReopenedAt is { } at
+                    && await PrimaryAsync(item, cancellationToken) is { Status: ItemStatus.Done } primary
+                    && at > primary.CompletedAt)
+                {
+                    if (primary.ClosedBySync)
+                    {
+                        // Its own source finished it, so the new work is this conversation's, as its own item.
+                        ItemMerger.Split(item, primary, source, now);
+                        item.Notes.Add(Note($"New messages in {sourceName} show more work after item {primary.Id} was finished." + Reason(src.Reasoning), source, now));
+                    }
+                    else
+                    {
+                        Reopen(primary, $"Reopened: new messages in {sourceName} show it isn't finished." + Reason(src.Reasoning), source, now);
+                    }
+
+                    reopened++;
                 }
             }
             else if (item.ClosedBySync && item.Status is ItemStatus.Done)
@@ -164,17 +214,33 @@ public sealed class SyncReconciler(AssistantDbContext db, TimeProvider time, IDu
         UpdatedAt = now,
     };
 
-    /// <summary>Open and snoozed items from every source, the ones a new item could repeat.</summary>
-    private Task<List<Item>> OpenItemsAsync(CancellationToken cancellationToken) =>
-        db.Items.Include(i => i.Notes).Include(i => i.Artifacts)
+    /// <summary>
+    /// The items a new one could repeat, from every source: open and snoozed ones, then ones finished lately. A
+    /// notification often arrives just after the work it's about was done, and a follow-up can show it wasn't.
+    /// </summary>
+    private async Task<List<Item>> DuplicateCandidatesAsync(DateTime now, CancellationToken cancellationToken)
+    {
+        var open = await db.Items.Include(i => i.Notes).Include(i => i.Artifacts)
             .Where(i => i.Status == ItemStatus.Open || i.Status == ItemStatus.Snoozed)
             .OrderByDescending(i => i.UpdatedAt)
             .Take(MaxDuplicateCandidates)
             .ToListAsync(cancellationToken);
 
+        var since = now - RecentlyClosed;
+        var closed = await db.Items.Include(i => i.Notes).Include(i => i.Artifacts)
+            .Where(i => i.Status == ItemStatus.Done && i.CompletedAt > since)
+            .OrderByDescending(i => i.CompletedAt)
+            .Take(MaxClosedCandidates)
+            .ToListAsync(cancellationToken);
+
+        return [.. open, .. closed];
+    }
+
+    private static string Reason(string? reason) => string.IsNullOrWhiteSpace(reason) ? "" : $" {reason.Trim()}";
+
     private async Task<Item?> PrimaryAsync(Item duplicate, CancellationToken cancellationToken) =>
         duplicate.MergedIntoId is { } id
-            ? await db.Items.Include(i => i.Notes).FirstOrDefaultAsync(i => i.Id == id, cancellationToken)
+            ? await db.Items.Include(i => i.Notes).Include(i => i.Artifacts).FirstOrDefaultAsync(i => i.Id == id, cancellationToken)
             : null;
 
     private static void Close(Item item, string note, string source, DateTime now)

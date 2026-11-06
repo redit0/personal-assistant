@@ -99,6 +99,9 @@ public class TriageDecision
     /// <summary>When a different request last started in this thread, so an item you already closed isn't reused for it.</summary>
     public DateTime? RequestStartedAt { get; set; }
 
+    /// <summary>When new messages showed that work you had marked done needs doing again, so that same item reopens.</summary>
+    public DateTime? ReopenedAt { get; set; }
+
     public DateTime TriagedAt { get; set; }
 
     public string? Model { get; set; }

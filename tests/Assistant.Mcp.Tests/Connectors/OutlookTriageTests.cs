@@ -104,6 +104,38 @@ public sealed class OutlookTriageTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
+    public async Task A_reply_showing_work_you_marked_done_isnt_finished_reopens_it()
+    {
+        var connector = CreateConnector();
+        var first = await connector.FetchAsync(default);
+        var externalId = Assert.Single(first.Items).ExternalId;
+        await _host.WithDbAsync(async db =>
+        {
+            db.Items.Add(new Item
+            {
+                Title = "Send Dana the Q4 numbers", Source = "outlook", ExternalId = externalId, Status = ItemStatus.Done,
+                CompletedAt = DateTime.UtcNow.AddHours(-1), CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            });
+            return await db.SaveChangesAsync();
+        });
+
+        _ai.Respond = _ => """{"decision":"ask","title":"Send Dana the Q4 numbers","confidence":0.9,"reopen":true,"reasoning":"Dana says the numbers are missing October."}""";
+        _http.OnUrl("messages/m5?$select=internetMessageHeaders", """{"internetMessageHeaders":[{"name":"From","value":"dana@example.com"}]}""");
+        _http.OnUrl("deltatoken=INBOX1", $$"""
+            {"value":[{{Message("m5", "c1", "RE: Q4 numbers", "Dana Smith", "dana@example.com", "These are missing October.")}}],
+             "@odata.deltaLink":"https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=INBOX3"}
+            """);
+
+        var second = await connector.FetchAsync(default);
+
+        Assert.Contains("The user marked that item done on", _ai.Prompts[^1]);
+        var item = Assert.Single(second.Items);
+        Assert.Equal(externalId, item.ExternalId);
+        Assert.NotNull(item.ReopenedAt);
+        Assert.True(item.RequestStartedAt < item.ReopenedAt, "Reopening keeps the same request, so the same item comes back.");
+    }
+
+    [Fact]
     public async Task Unsure_judgments_go_to_needs_a_look()
     {
         _ai.Respond = _ => """{"decision":"ask","title":"Maybe review the deck","confidence":0.4}""";

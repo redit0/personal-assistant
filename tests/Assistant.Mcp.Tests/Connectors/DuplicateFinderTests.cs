@@ -63,6 +63,38 @@ public sealed class DuplicateFinderTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
+    public async Task Shows_finished_items_with_how_they_closed_and_passes_on_reopen()
+    {
+        var merged = new Item
+        {
+            Id = 12, Title = "Review: Preserve external URLs", Source = "azuredevops", Status = ItemStatus.Done, ClosedBySync = true,
+            CompletedAt = DateTime.UtcNow.AddMinutes(-1), CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+            Notes = [new ItemNote { Text = "Closed automatically: it's no longer open or waiting on you in Azure DevOps.", Author = "azuredevops", CreatedAt = DateTime.UtcNow }],
+        };
+        var yours = new Item
+        {
+            Id = 13, Title = "Send Dana the Q3 report", Source = "outlook", Status = ItemStatus.Done,
+            CompletedAt = DateTime.UtcNow.AddDays(-2), CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        };
+        var candidate = Candidate with { LatestMessageAt = DateTime.UtcNow.AddMinutes(-5) };
+
+        _ai.Respond = _ => """{"duplicateOf":12,"confidence":0.9,"reopen":true,"reasoning":"Asks for more on the same change."}""";
+        var reopen = await _finder.FindAsync(candidate, "Outlook", [.. Open, merged, yours], default);
+
+        Assert.Equal((12, true), (reopen?.ItemId, reopen?.Reopen));
+        var prompt = _ai.Prompts[^1];
+        Assert.Contains("Its latest message was sent", prompt);
+        Assert.Contains("Items finished lately:", prompt);
+        Assert.Contains("[12] Review: Preserve external URLs", prompt);
+        Assert.Contains("no longer open or waiting on you in Azure DevOps", prompt);
+        Assert.Contains("Marked done by the user.", prompt);
+
+        // Reopen means nothing for an item that's still open.
+        _ai.Respond = _ => """{"duplicateOf":7,"confidence":0.9,"reopen":true}""";
+        Assert.False((await _finder.FindAsync(candidate, "Outlook", [.. Open, merged], default))?.Reopen);
+    }
+
+    [Fact]
     public async Task Doesnt_ask_when_nothing_is_open()
     {
         Assert.Null(await _finder.FindAsync(Candidate, "Slack", [], default));
