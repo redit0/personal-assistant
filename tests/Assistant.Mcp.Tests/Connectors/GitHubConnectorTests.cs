@@ -90,6 +90,26 @@ public sealed class GitHubConnectorTests : IDisposable
     }
 
     [Fact]
+    public async Task A_secondary_rate_limit_says_so_instead_of_blaming_sso()
+    {
+        _http.On(_ => true, """{"documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits","message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}""", HttpStatusCode.Forbidden);
+
+        var ex = await Assert.ThrowsAsync<ConnectorException>(() => CreateConnector().FetchAsync(default));
+        Assert.Contains("too many arrived close together", ex.Message);
+        Assert.Contains("next sync", ex.Message);
+        Assert.DoesNotContain("SSO", ex.Message);
+    }
+
+    [Fact]
+    public async Task A_plain_forbidden_still_points_at_sso()
+    {
+        _http.On(_ => true, """{"message":"Resource protected by organization SAML enforcement."}""", HttpStatusCode.Forbidden);
+
+        var ex = await Assert.ThrowsAsync<ConnectorException>(() => CreateConnector().FetchAsync(default));
+        Assert.Contains("SSO", ex.Message);
+    }
+
+    [Fact]
     public void Not_ready_until_enabled_with_a_token()
     {
         var settings = new UserSettingsStore(_settingsFile);

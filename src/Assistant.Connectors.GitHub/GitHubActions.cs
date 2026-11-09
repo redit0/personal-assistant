@@ -214,6 +214,11 @@ public sealed class GitHubActions(IHttpClientFactory httpClients, GitHubConnecto
             return JsonDocument.Parse(string.IsNullOrWhiteSpace(text) ? "{}" : text);
         }
 
+        if (GitHubConnector.RateLimitMessage(response, text) is { } limited)
+        {
+            throw new ConnectorException($"{limited} Try again in a few minutes.");
+        }
+
         throw response.StatusCode switch
         {
             HttpStatusCode.Unauthorized => new ConnectorException("GitHub rejected the token."),

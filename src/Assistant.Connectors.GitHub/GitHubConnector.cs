@@ -194,14 +194,47 @@ public sealed class GitHubConnector(
         }
 
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (RateLimitMessage(response, body) is { } limited)
+        {
+            throw new ConnectorException($"{limited} It will try again on the next sync.");
+        }
+
         throw response.StatusCode switch
         {
             HttpStatusCode.Unauthorized => new ConnectorException("GitHub rejected the token. Create a new one, or run gh auth login again."),
-            HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests when response.Headers.TryGetValues("x-ratelimit-remaining", out var left) && left.FirstOrDefault() == "0" =>
-                new ConnectorException("GitHub rate limit reached. It will retry on the next sync."),
             HttpStatusCode.Forbidden => new ConnectorException($"GitHub refused the request. If your org uses SSO, authorize the token for it. ({Short(body)})"),
             _ => new ConnectorException($"GitHub returned {(int)response.StatusCode}: {Short(body)}"),
         };
+    }
+
+    /// <summary>
+    /// What to say when GitHub turned a request away for going too fast, or null when it didn't. GitHub answers
+    /// with 403 or 429 for both its hourly limit and its secondary limit, which trips on bursts of requests from
+    /// anything sharing the token, such as the GitHub CLI.
+    /// </summary>
+    public static string? RateLimitMessage(HttpResponseMessage response, string body)
+    {
+        if (response.StatusCode is not (HttpStatusCode.Forbidden or HttpStatusCode.TooManyRequests))
+        {
+            return null;
+        }
+
+        var hourlyUsedUp = response.Headers.TryGetValues("x-ratelimit-remaining", out var left) && left.FirstOrDefault() == "0";
+        var secondary = body.Contains("secondary rate limit", StringComparison.OrdinalIgnoreCase);
+        if (!hourlyUsedUp && !secondary && response.Headers.RetryAfter is null && !body.Contains("rate limit", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var wait = response.Headers.RetryAfter?.Delta
+            ?? (response.Headers.TryGetValues("x-ratelimit-reset", out var reset) && long.TryParse(reset.FirstOrDefault(), out var epoch)
+                ? DateTimeOffset.FromUnixTimeSeconds(epoch) - DateTimeOffset.UtcNow
+                : null);
+        var after = wait is { TotalSeconds: > 0 } w ? $" GitHub asked to wait about {Math.Max(1, (int)Math.Ceiling(w.TotalMinutes))} minute(s)." : "";
+
+        return secondary
+            ? $"GitHub is briefly limiting requests on your account because too many arrived close together. Other tools using the same token, like the GitHub CLI, count toward this.{after}"
+            : $"GitHub's hourly request limit for your account is used up.{after}";
     }
 
     private static string Short(string text) => text.Length <= 200 ? text : text[..200] + "…";
