@@ -74,10 +74,7 @@ public sealed class TeamsConnector(
 
         if (t.ChatsEnabled)
         {
-            if (await PullChatsAsync(t, cancellationToken) is { } backlog)
-            {
-                warnings.Add(backlog);
-            }
+            warnings.AddRange(await PullChatsAsync(t, cancellationToken));
         }
 
         if (t.ChannelsEnabled)
@@ -103,8 +100,9 @@ public sealed class TeamsConnector(
     }
 
     /// <summary>Reads chats with activity since the last sync, oldest first, so a capped sync picks up where it stopped.</summary>
-    private async Task<string?> PullChatsAsync(TeamsSettings t, CancellationToken cancellationToken)
+    private async Task<List<string>> PullChatsAsync(TeamsSettings t, CancellationToken cancellationToken)
     {
+        var warnings = new List<string>();
         await using var scope = scopes.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AssistantDbContext>();
         var now = time.GetUtcNow().UtcDateTime;
@@ -117,12 +115,41 @@ public sealed class TeamsConnector(
         var active = chats.Where(c => c.LastMessageAt > since).OrderBy(c => c.LastMessageAt).ToList();
         var batch = active.Take(Math.Max(1, t.MaxChatsPerSync)).ToList();
 
+        var refused = new List<string>();
+        ConnectorException? refusal = null;
+
         foreach (var chat in batch)
         {
             await Task.Delay(Pace, cancellationToken);
-            // A little overlap covers clock skew between the chat preview and its messages.
-            var messages = await graph.GetChatMessagesAsync(chat.Id, since.AddMinutes(-5), cancellationToken);
+            List<TeamsMessage> messages;
+            try
+            {
+                // A little overlap covers clock skew between the chat preview and its messages.
+                messages = await graph.GetChatMessagesAsync(chat.Id, since.AddMinutes(-5), cancellationToken);
+            }
+            catch (ConnectorException ex) when (ex.Data["status"] is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.NotFound)
+            {
+                // Graph lists some chats it won't let you read, like a meeting chat you've left or one another
+                // organization owns. Skipping it lets the rest sync, and moves past it so it doesn't fail every time.
+                refused.Add(ChatSubject(chat));
+                refusal = ex;
+                logger.LogWarning("Teams wouldn't let chat {ChatId} be read; skipped", chat.Id);
+                continue;
+            }
+
             await StoreAsync(db, chat.Id, "chat:" + chat.ChatType, ChatSubject(chat), chat.WebUrl, messages, chat.MemberNames, cancellationToken);
+        }
+
+        // Every chat refused means the permission itself is missing, which skipping would hide.
+        if (refusal is not null && batch.Count > 1 && refused.Count == batch.Count)
+        {
+            throw refusal;
+        }
+
+        if (refused.Count > 0)
+        {
+            warnings.Add($"Skipped {(refused.Count == 1 ? "a chat" : $"{refused.Count} chats")} Teams wouldn't let me read: {string.Join("; ", refused.Take(3))}{(refused.Count > 3 ? "; and more" : "")}. "
+                + "This usually means a meeting chat you've left, or one owned by another organization.");
         }
 
         var watermark = batch.Count > 0 ? batch[^1].LastMessageAt!.Value : since;
@@ -138,7 +165,12 @@ public sealed class TeamsConnector(
 
         await db.SaveChangesAsync(cancellationToken);
         var left = active.Count - batch.Count;
-        return left > 0 ? $"{left} more chat{(left == 1 ? "" : "s")} with new messages will be read on the next syncs." : null;
+        if (left > 0)
+        {
+            warnings.Add($"{left} more chat{(left == 1 ? "" : "s")} with new messages will be read on the next syncs.");
+        }
+
+        return warnings;
     }
 
     private async Task PullChannelsAsync(TeamsSettings t, CancellationToken cancellationToken)

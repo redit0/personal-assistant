@@ -418,6 +418,59 @@ public sealed class ConversationConnectorTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
+    public async Task Teams_skips_a_chat_it_isnt_allowed_to_read_and_keeps_going()
+    {
+        _settings.Update(s => s.Teams.ChatsEnabled = true);
+
+        var earlier = DateTime.UtcNow.AddHours(-2).ToString("O");
+        var recent = DateTime.UtcNow.AddHours(-1).ToString("O");
+        _http
+            .OnUrl("v1.0/me?$select=id,displayName", """{"id":"me1","displayName":"Sam Rivera"}""")
+            .OnUrl("me/chats?$expand", $$"""
+                {"value":[
+                  {"id":"meet1","chatType":"meeting","topic":"Vendor kickoff","lastMessagePreview":{"createdDateTime":"{{earlier}}"},"members":[]},
+                  {"id":"c1","chatType":"oneOnOne","lastMessagePreview":{"createdDateTime":"{{recent}}"},
+                   "members":[{"displayName":"Sam Rivera"},{"displayName":"Dana Smith"}]}
+                ]}
+                """)
+            .OnUrl("chats/meet1/messages", """{"error":{"code":"Forbidden","message":"Insufficient privileges to complete the operation."}}""", System.Net.HttpStatusCode.Forbidden)
+            .OnUrl("chats/c1/messages", $$"""
+                {"value":[{{TeamsMessage("m1", "Dana Smith", "u2", "tenant-1", "<p>Can you review the SOW by Friday?</p>", recent)}}]}
+                """);
+
+        var connector = CreateTeams();
+        var snapshot = await connector.FetchAsync(default);
+
+        var warning = Assert.Single(snapshot.Warnings);
+        Assert.Contains("Vendor kickoff", warning);
+        Assert.Single(snapshot.Items, i => i.ExternalId!.StartsWith("teams:c1|"));
+
+        // It moved past the chat, so the next sync doesn't ask for it again.
+        await connector.FetchAsync(default);
+        Assert.Single(_http.Requests, r => r.Request.RequestUri!.ToString().Contains("chats/meet1/messages"));
+    }
+
+    [Fact]
+    public async Task Teams_still_reports_missing_permission_when_no_chat_can_be_read()
+    {
+        _settings.Update(s => s.Teams.ChatsEnabled = true);
+
+        var recent = DateTime.UtcNow.AddHours(-1).ToString("O");
+        _http
+            .OnUrl("v1.0/me?$select=id,displayName", """{"id":"me1","displayName":"Sam Rivera"}""")
+            .OnUrl("me/chats?$expand", $$"""
+                {"value":[
+                  {"id":"c1","chatType":"oneOnOne","lastMessagePreview":{"createdDateTime":"{{recent}}"},"members":[]},
+                  {"id":"c2","chatType":"group","lastMessagePreview":{"createdDateTime":"{{recent}}"},"members":[]}
+                ]}
+                """)
+            .On(r => r.RequestUri!.ToString().Contains("/messages"), """{"error":{"code":"Forbidden"}}""", System.Net.HttpStatusCode.Forbidden);
+
+        var ex = await Assert.ThrowsAsync<Core.Connectors.ConnectorException>(() => CreateTeams().FetchAsync(default));
+        Assert.Contains("Chat.Read", ex.Message);
+    }
+
+    [Fact]
     public async Task Slack_skips_a_channel_it_cant_read_and_keeps_going()
     {
         _host.Services.GetRequiredService<ISecretStore>().Set(SecretNames.SlackToken, "xoxp-test");
